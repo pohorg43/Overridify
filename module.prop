@@ -1,0 +1,6 @@
+id=overridify
+name=Overridify
+version=v1.6
+versionCode=20
+author=t.me/pohorg
+description=Intelligent audit and selective override of Android system flags. Run 'overridify' in Termux to start.

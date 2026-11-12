@@ -1,0 +1,44 @@
+# ==============================================================================
+# Overridify — .gitignore
+# ==============================================================================
+
+# Internal research and draft notes (local-only)
+AUDIT_UNKNOWN_PROPS.md
+CHANGELOG.md
+DOLBY_AUDIT.md
+TODO.md
+
+# Local development helper scripts and internal tools
+update.sh
+audit_diff.sh
+tools/
+
+# Compiled C binaries (built automatically via GitHub Actions CI)
+bin/overridify-scan
+bin/mali-patcher
+
+# Generated module symlink tree (created at install time by customize.sh)
+system/
+
+# Cache, logs and state files
+cache/
+*.cache
+*.tmp
+*.sig
+*.bak
+mount.log
+
+# Device-specific audit exports
+*audit_report*.txt
+
+# Python runtime artifacts
+__pycache__/
+*.pyc
+
+# Build and debugging artifacts
+*.o
+dbg_scan.*
+test_*
+system.prop
+custom_presets/
+src/overridify-scan-legacy.c
