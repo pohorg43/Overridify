@@ -3,9 +3,17 @@ name: Build & Package Module
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
     tags: ['v*']
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
   workflow_dispatch:
 
 permissions:
