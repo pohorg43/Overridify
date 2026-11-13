@@ -1,7 +1,7 @@
 # Overridify
 
 <p align="left">
-  <strong>🌐 Language / Язык:</strong>
+  <strong>🌐</strong>
   <b>English</b> | <a href="README.ru.md">Русский</a>
 </p>
 
@@ -9,7 +9,7 @@
 
 Unlike conventional tweakers built around blind copy-pasted property lists from the internet, **Overridify** operates on the **Ground Truth** principle. It ships with a custom native C micro-scanner (`overridify-scan`) and a multi-threaded Dalvik DEX analyzer that disassemble ARM64 system binaries/libraries and parse framework/APK bytecode directly on the device — proving whether a flag is genuinely read by your ROM's machine code, what its true compile-time default is, or whether it is complete dead weight.
 
-Alongside the audit engine, Overridify includes an intelligent preset manager: verified hardware-aware profiles, an interactive custom profile builder with real-time ROM validation, and instant `OVRD1` Base64 preset/pack sharing.
+Alongside the audit engine, Overridify includes an intelligent preset manager: verified hardware-aware profiles, an interactive custom profile builder with real-time ROM validation, and instant preset/pack sharing.
 
 ---
 
@@ -20,10 +20,10 @@ Alongside the audit engine, Overridify includes an intelligent preset manager: v
   - Cross-platform leftovers (e.g., MediaTek flags injected on Snapdragon devices, and vice versa);
   - Deprecated AOSP flags with exact Android lifecycle removal info (e.g., `deprecated A11+`);
   - Typos and mythical tweaker flags that never existed in Android binaries.
-- **Compile-Time Machine Defaults (>80% Precision)** — extracts true factory default values compiled directly into native ARM64 libraries (`.rodata`, `.data.rel.ro` tables, function prologues) and Dalvik DEX bytecode (`<clinit>` / `SystemProperties.get*`).
+- **Compile-Time Machine Defaults** — extracts true factory default values compiled directly into native ARM64 libraries and Dalvik DEX bytecode.
 - **Smart Preset Manager & Profile Builder** —
-  - Built-in profiles (*Vulkan UI Pipeline*, *SurfaceFlinger Vulkan*, *Ultra Smooth UI*, *Touch Response*, *Gaming Mode*) with conflict detection against installed modules;
-  - **Mali Guard & Qualcomm Guard** — automatic ARM64 binary patcher for the Mali Vulkan `vkGetDeviceQueue2` driver defect (prevents SurfaceFlinger black screen/hang) and anti-flicker protection for Snapdragon;
+  - Built-in profiles (*Vulkan UI Pipeline*, *Experimental SF Smoothness*, *Touch Response*, *Gaming Mode*) with conflict detection against installed modules;
+  - **Mali Guard & Qualcomm Guard** — experimental automatic binary patcher for the Mali Vulkan `vkGetDeviceQueue2` driver defect (prevents SurfaceFlinger black screen/hang) and anti-flicker protection for Snapdragon;
   - Interactive custom preset constructor (`key=value`) with instant scanner validation against your ROM's binaries;
   - Fast export & import of single presets or full packs via compact `OVRD1:` strings.
 - **100% Offline & Self-Contained** — zero internet access, zero external dependencies (`pkg install` is not required). Bundles an embedded `mawk` engine and native C binaries.
@@ -107,50 +107,6 @@ overridify help               # Show CLI command reference
 1. Download the latest flashable `Overridify-v*.zip` from [**Releases**](../../releases).
 2. Flash it via Magisk / KernelSU / APatch manager *(available immediately in Termux; reboot only required after applying property presets)*.
 3. Open Termux and run `overridify`.
-
----
-
-## Building from Source
-
-Native ARM64 binaries (`overridify-scan` and `mali-patcher`) are compiled automatically from [`src/`](src/) via [GitHub Actions CI](.github/workflows/build.yml) using Android NDK targeting **API 23 (`aarch64-linux-android23-clang`)**.
-
-To build manually:
-
-```bash
-# On device in Termux:
-clang -O3 -Wall src/overridify-scan.c -lz -lpthread -o bin/overridify-scan
-clang -O3 -Wall src/mali-patcher.c -o bin/mali-patcher
-
-# Cross-compiling on Linux x86_64 with Android NDK (API 23+):
-$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang \
-    -O3 -Wall -s src/overridify-scan.c -lz -o bin/overridify-scan
-$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang \
-    -O3 -Wall -s src/mali-patcher.c -o bin/mali-patcher
-```
-
-## Project Structure
-
-```text
-overridify/
-├── module.prop                  # Module metadata
-├── customize.sh                 # Installer (preserves user overrides & custom presets on upgrade)
-├── uninstall.sh                 # Clean removal handler
-├── skip_mount / skip_mountify   # Overlay isolation markers
-├── bin/
-│   ├── overridify               # Main TUI/CLI engine (Shell + AWK orchestration)
-│   ├── overridify-scan*         # Native ARM64 ELF disassembler & DEX scanner (built in CI)
-│   ├── mali-patcher*            # Native ARM64 Mali GPU driver patcher (built in CI)
-│   └── mawk                     # Embedded standalone AWK engine
-├── src/
-│   ├── overridify-scan.c        # ARM64 static analyzer & Dalvik DEX parser (C)
-│   └── mali-patcher.c           # vkGetDeviceQueue2 binary patcher (C)
-├── common/
-│   ├── database/                # AOSP lifecycle DB, subsystem targets & preset definitions
-│   └── languages/ru.sh          # Russian localization
-└── .github/workflows/build.yml  # Automated NDK build & release ZIP packaging
-```
-
-> `*` Compiled automatically by GitHub Actions CI from `src/` and packaged into release archives.
 
 ---
 
