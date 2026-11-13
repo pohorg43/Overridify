@@ -64,7 +64,7 @@ Result of static ARM64 machine code disassembly and Dalvik DEX bytecode inspecti
 | **`DEFAULT_BOOL (true/false)`** | Resolved boolean compile-time default. |
 | **`DEFAULT_INT: <number>`** | Resolved integer compile-time default. |
 | **`DEFAULT_STR: "<text>"`** | Resolved string compile-time default. |
-| **`DYNAMIC_DEFAULT`** | Binary genuinely reads the property, but its fallback value is computed dynamically at runtime. |
+| **`DYNAMIC_DEFAULT`** | Binary genuinely reads the property, but its fallback value is computed dynamically at runtime. (Active work is underway to reduce the number of such verdicts by teaching the scanner to evaluate bool/int/str natively.) |
 | **`NOT_FOUND_IN_BINARY`** | Property is present in `getprop`, but no reader exists in the target binary (or it is an unread legacy leftover). |
 
 ---
