@@ -13,9 +13,10 @@ update.sh
 audit_diff.sh
 tools/
 
-# Compiled C binaries (built automatically via GitHub Actions CI)
+# Compiled C binaries & generated AWK DB (built automatically via GitHub Actions CI)
 bin/overridify-scan
 bin/mali-patcher
+common/database/aosp_reference.awk
 
 # Generated module symlink tree (created at install time by customize.sh)
 system/

@@ -42,6 +42,11 @@ jobs:
             echo "NDK_ROOT=$PWD/android-ndk-${NDK_FALLBACK_VERSION}" >> "$GITHUB_ENV"
           fi
 
+      - name: Generate compiled AWK reference database
+        run: |
+          python3 .github/scripts/gen_aosp_awk.py
+          test -s common/database/aosp_reference.awk
+
       - name: Compile native ARM64 binaries
         run: |
           CC="${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${API_LEVEL}-clang"
@@ -71,10 +76,13 @@ jobs:
             bin/overridify-scan \
             bin/mawk \
             bin/mali-patcher \
-            common/
+            common/ \
+            -x "common/database/aosp_reference.sh"
 
           unzip -l "${ZIP_NAME}"
           unzip -t "${ZIP_NAME}"
+          ! unzip -l "${ZIP_NAME}" | grep -q "aosp_reference.sh"
+          unzip -l "${ZIP_NAME}" | grep -q "aosp_reference.awk"
 
       - name: Upload native binaries artifact
         uses: actions/upload-artifact@v4

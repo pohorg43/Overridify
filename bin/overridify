@@ -104,6 +104,22 @@ elif [ -x /data/adb/bin/gawk ]; then
     AWK_BIN="/data/adb/bin/gawk"
 fi
 
+if ! type get_prop_lifecycle >/dev/null 2>&1; then
+    get_prop_lifecycle() {
+        local awk_ref="" d=""
+        for d in "$MODDIR" /data/adb/modules/overridify /data/data/com.termux/files/home/overridify; do
+            [ -f "$d/common/database/aosp_reference.awk" ] && { awk_ref="$d/common/database/aosp_reference.awk"; break; }
+        done
+        if [ -n "$awk_ref" ]; then
+            local res
+            res=$(printf "%s\n" "$1" | $AWK_BIN -v api="${2:-$API}" -v single_mode=1 -f "$awk_ref" 2>/dev/null)
+            [ -n "$res" ] && echo "${res#*:}" || echo ":::"
+        else
+            echo ":::"
+        fi
+    }
+fi
+
 RESETPROP_BIN="resetprop"
 for rp in resetprop /data/adb/magisk/resetprop /data/adb/ksu/bin/resetprop /data/adb/ap/bin/resetprop; do
     if command -v "$rp" >/dev/null 2>&1 || [ -f "$rp" ]; then RESETPROP_BIN="$rp"; break; fi
@@ -390,7 +406,7 @@ init_cache() {
                         [ -f "$d/common/database/aosp_reference.awk" ] && { awk_ref="$d/common/database/aosp_reference.awk"; break; }
                     done
                     if [ -n "$awk_ref" ]; then
-                        $AWK_BIN -v api="$API" -f "$awk_ref" "$OVER_TMP_DIR/lc_delta.tmp" >> "$CACHE_LIFECYCLE" 2>/dev/null
+                        $AWK_BIN -v api="$API" -v lc_f="$CACHE_LIFECYCLE" -f "$awk_ref" "$OVER_TMP_DIR/lc_delta.tmp" >> "$CACHE_LIFECYCLE" 2>/dev/null
                     else
                         while IFS= read -r p; do
                             [ -z "$p" ] && continue
