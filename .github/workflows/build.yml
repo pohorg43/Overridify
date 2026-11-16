@@ -109,5 +109,5 @@ jobs:
           else
             gh release create "${TAG}" "${ZIP_NAME}" \
               --title "Overridify ${TAG}" \
-              --generate-notes
+              --notes-from-tag
           fi
