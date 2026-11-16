@@ -234,7 +234,7 @@ ensure_elf_cache() {
     local elf_sig_f="$OVER_TMP_DIR/elf_scan.sig"
     local scan_sig=$(stat -c '%Y:%s' "$SCAN" 2>/dev/null)
     local targets_sig=$(stat -c '%Y:%s' "$MODDIR/common/database/audit_targets.sh" 2>/dev/null)
-    local mod_ver="v1.5"
+    local mod_ver="v1.7"
     [ -f "$MODDIR/module.prop" ] && mod_ver=$(grep -m 1 '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
     local mods_hash=$(cat "$OVER_TMP_DIR/mods.sig" 2>/dev/null | md5sum 2>/dev/null | awk '{print $1}')
     [ -z "$mods_hash" ] && mods_hash=$(cat "$OVER_TMP_DIR/mods.sig" 2>/dev/null | tr '\n' '_')
@@ -308,25 +308,32 @@ init_cache() {
     CACHE_LIFECYCLE="$OVER_TMP_DIR/cache_lifecycle.tmp"
     CACHE_FRAMEWORK="$OVER_TMP_DIR/cache_framework.tmp"
     CACHE_DEX_DEFAULTS="$OVER_TMP_DIR/cache_dex_defaults.tmp"
+    CACHE_DEX_TOKENS="$OVER_TMP_DIR/cache_dex_tokens.tmp"
     CACHE_JUNK="$OVER_TMP_DIR/cache_junk.tmp"
 
     # Уровень 3 (RAM): Всегда актуальный снимок live getprop (выполняется синхронно за ~30-40 мс)
     getprop | tr -d '[]' | $AWK_BIN -F': ' '{print $1 "=" $2}' > "$CACHE_LIVE_PROPS" 2>/dev/null
+
+    local mod_ver="v1.7"
+    [ -f "$MODDIR/module.prop" ] && mod_ver=$(grep -m 1 '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
+    local scan_sig="$(stat -c '%Y:%s' "$SCAN" "$0" 2>/dev/null | tr '\n' '_')"
+    local boot_sig="${GLOBAL_BOOT_TIME}_$(getprop ro.build.fingerprint)_${mod_ver}_${scan_sig}"
+    local old_boot_sig=""
+    [ -f "$OVER_TMP_DIR/boot.sig" ] && old_boot_sig=$(cat "$OVER_TMP_DIR/boot.sig" 2>/dev/null)
+    if [ "$boot_sig" != "$old_boot_sig" ]; then
+        rm -f "$CACHE_READY_FILE" "$CACHE_READY_FULL_FILE" "$OVER_TMP_DIR/cache_dex_tokens.tmp" 2>/dev/null
+    fi
 
     [ -f "$CACHE_READY_FULL_FILE" ] && return 0
     [ -n "$PID_CACHE_FW" ] && return 0
     _INIT_CACHE_RUNNING=1
     (
         local t_init_start=$(date +%s.%N)
-        local mod_ver="v1.5"
-        [ -f "$MODDIR/module.prop" ] && mod_ver=$(grep -m 1 '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
-        local boot_sig="${GLOBAL_BOOT_TIME}_$(getprop ro.build.fingerprint)_${mod_ver}"
-        local old_boot_sig=""
-        [ -f "$OVER_TMP_DIR/boot.sig" ] && old_boot_sig=$(cat "$OVER_TMP_DIR/boot.sig" 2>/dev/null)
 
         local fw_roots=""
         for d in /*; do
             [ -d "$d" ] || continue
+            [ -L "$d" ] && continue
             case "$d" in
                 /proc|/sys|/dev|/data|/data_mirror|/storage|/sdcard|/mnt|/apex|/config|/metadata|/lost+found|/tmp|/linkerconfig|/bugreports|/debug_ramdisk|/bootstrap-apex)
                     continue ;;
@@ -534,6 +541,12 @@ init_cache() {
                 /^[[:space:]]*setprop[[:space:]]+/ {
                     print FILENAME ":1:" $0 > rc_out;
                 }
+                /^[[:space:]]*wait_for_prop[[:space:]]+/ {
+                    sub(/^[[:space:]]+/, "");
+                    split($0, parts, /[[:space:]]+/);
+                    p = parts[2];
+                    if (p != "" && !seen[p]++) print p >> alive_rc;
+                }
                 /property:/ {
                     s = $0;
                     while (match(s, /property:[a-zA-Z0-9_.-]+/)) {
@@ -590,6 +603,8 @@ init_cache() {
         # Уровень 1 (DEX):
         local persist_cache_file="$OVER_CACHE_DIR/dex_framework.cache"
         [ ! -w "$OVER_CACHE_DIR" ] && persist_cache_file="$OVER_TMP_DIR/dex_framework.cache"
+        local persist_tokens_file="$OVER_CACHE_DIR/dex_tokens.cache"
+        [ ! -w "$OVER_CACHE_DIR" ] && persist_tokens_file="$OVER_TMP_DIR/dex_tokens.cache"
         local targets_sig=$(stat -c '%Y:%s' "$MODDIR/common/database/audit_targets.sh" 2>/dev/null)
         local cur_fp="$(getprop ro.build.fingerprint)_$(stat -c %Y /system/framework/services.jar 2>/dev/null)_$(stat -c %Y "$SCAN" 2>/dev/null)_${targets_sig}_${mod_ver}"
         local cached_fp=""
@@ -601,30 +616,45 @@ init_cache() {
         fi
 
         if [ -n "$cached_fp" ] && [ "$cached_fp" = "$cur_fp" ]; then
-            if [ ! -f "$CACHE_DEX_DEFAULTS" ] || [ ! -f "$CACHE_FRAMEWORK" ]; then
+            if [ ! -f "$CACHE_DEX_DEFAULTS" ] || [ ! -f "$CACHE_FRAMEWORK" ] || [ ! -f "$CACHE_DEX_TOKENS" ]; then
                 cp "$persist_cache_file" "$CACHE_DEX_DEFAULTS" 2>/dev/null
-                $AWK_BIN '!/^#/ {
+                $AWK_BIN '!/^#/ && !/^__DEX_TOKEN__:/ {
                     eq = index($0, "="); pipe = match($0, /\|[^|]*$/);
                     if (eq > 0 && pipe > eq) print substr($0, 1, eq - 1) "|" substr($0, pipe + 1);
                 }' "$CACHE_DEX_DEFAULTS" > "$CACHE_FRAMEWORK" 2>/dev/null
+                [ -f "$persist_tokens_file" ] && cp -f "$persist_tokens_file" "$CACHE_DEX_TOKENS" 2>/dev/null
             fi
         elif [ -f "$SCAN" ]; then
             local fw_jars="$(get_all_target_jars)"
             echo "# FINGERPRINT: $cur_fp" > "$CACHE_DEX_DEFAULTS"
-            "$SCAN" --dex $fw_jars 2>/dev/null | $AWK_BIN '
+            rm -f "$CACHE_DEX_TOKENS" 2>/dev/null
+            "$SCAN" --dex $fw_jars 2>/dev/null | $AWK_BIN -v dtok="$CACHE_DEX_TOKENS" '
             {
+                if ($0 ~ /^__DEX_TOKEN__:/) {
+                    tok = substr($0, 15);
+                    eq = index(tok, "=");
+                    if (eq > 0) tok = substr(tok, 1, eq - 1);
+                    if (tok != "" && !(tok in dex_toks)) {
+                        print tok > dtok;
+                        dex_toks[tok] = 1;
+                    }
+                    next;
+                }
                 eq = index($0, "=");
                 if (eq > 0) {
                     p = substr($0, 1, eq - 1);
                     val = substr($0, eq + 1);
                     # Иерархия точности дефолтов:
-                    # 1) Явный константный дефолт (DEFAULT_*) всегда бьет DYNAMIC_SETTER / NO_DEFAULT / DYNAMIC_DEFAULT
-                    # 2) DYNAMIC_DEFAULT бьет DYNAMIC_SETTER / NO_DEFAULT
-                    # 3) Непустая строка DEFAULT_STR бьет пустую DEFAULT_STR: ""
-                    # 4) Неотрицательный DEFAULT_INT (0, 1...) бьет сигнальный код ошибки DEFAULT_INT: -1
+                    # 1) Любой геттер (DEFAULT_*, DYNAMIC_DEFAULT, NO_DEFAULT) всегда бьет DYNAMIC_SETTER
+                    # 2) Явный константный дефолт (DEFAULT_*) бьет NO_DEFAULT / DYNAMIC_DEFAULT
+                    # 3) DYNAMIC_DEFAULT бьет NO_DEFAULT
+                    # 4) Непустая строка DEFAULT_STR бьет пустую DEFAULT_STR: ""
+                    # 5) Неотрицательный DEFAULT_INT (0, 1...) бьет сигнальный код ошибки DEFAULT_INT: -1
                     if (!(p in best)) {
                         best[p] = val;
-                    } else if (best[p] ~ /^(DYNAMIC_SETTER|NO_DEFAULT)/ && val ~ /^(DEFAULT_|DYNAMIC_DEFAULT)/) {
+                    } else if (best[p] ~ /^DYNAMIC_SETTER/ && val !~ /^DYNAMIC_SETTER/) {
+                        best[p] = val;
+                    } else if (best[p] ~ /^NO_DEFAULT/ && val ~ /^(DEFAULT_|DYNAMIC_DEFAULT)/) {
                         best[p] = val;
                     } else if (best[p] ~ /^DYNAMIC_DEFAULT/ && val ~ /^DEFAULT_/) {
                         best[p] = val;
@@ -639,12 +669,42 @@ init_cache() {
             }
             END {
                 for (p in best) print p "=" best[p];
+                if (dtok != "") close(dtok);
             }' >> "$CACHE_DEX_DEFAULTS" 2>/dev/null
-            $AWK_BIN '!/^#/ {
+            $AWK_BIN '!/^#/ && !/^__DEX_TOKEN__:/ {
                 eq = index($0, "="); pipe = match($0, /\|[^|]*$/);
                 if (eq > 0 && pipe > eq) print substr($0, 1, eq - 1) "|" substr($0, pipe + 1);
             }' "$CACHE_DEX_DEFAULTS" > "$CACHE_FRAMEWORK" 2>/dev/null
             cp "$CACHE_DEX_DEFAULTS" "$persist_cache_file" 2>/dev/null
+            local pb_list=$(find $fw_roots $apex_roots /metadata/aconfig -maxdepth 4 \( -name "*aconfig_flags.pb" -o -name "*.val" \) 2>/dev/null)
+            if [ -n "$pb_list" ]; then
+                $STRINGS_BIN $pb_list 2>/dev/null | $AWK_BIN '
+                function emit_tok(s,    d, s2) {
+                    if (length(s) < 10) return;
+                    print s;
+                    d = match(s, /\.[^.]+$/);
+                    if (d > 0 && length(substr(s, d + 1)) >= 10) print substr(s, d + 1);
+                    if (s ~ /[08]$/) {
+                        s2 = substr(s, 1, length(s) - 1);
+                        if (length(s2) >= 10) {
+                            print s2;
+                            d = match(s2, /\.[^.]+$/);
+                            if (d > 0 && length(substr(s2, d + 1)) >= 10) print substr(s2, d + 1);
+                        }
+                    }
+                }
+                {
+                    line = $0;
+                    while (match(line, /[a-z][a-z0-9_.-]*_[a-z0-9_]+/)) {
+                        rs = RSTART; rl = RLENGTH;
+                        t = substr(line, rs, rl);
+                        line = substr(line, rs + rl);
+                        emit_tok(t);
+                    }
+                }' >> "$CACHE_DEX_TOKENS" 2>/dev/null
+            fi
+            [ -f "$CACHE_DEX_TOKENS" ] && sort -u -o "$CACHE_DEX_TOKENS" "$CACHE_DEX_TOKENS" 2>/dev/null
+            [ -f "$CACHE_DEX_TOKENS" ] && cp -f "$CACHE_DEX_TOKENS" "$persist_tokens_file" 2>/dev/null
         fi
         [ -n "$OVERRIDIFY_BENCH" ] && $AWK_BIN -v ts="$t_init_start" -v tn="$(date +%s.%N)" 'BEGIN { printf "[DEBUG-INIT] dex done in %.0fms\n", (tn-ts)*1000 }'
 
@@ -1097,7 +1157,12 @@ render_audit_item() {
         local j_def=$(get_dex_default "$p")
         if [ -n "$j_def" ] && [ "$j_def" != "UNKNOWN" ]; then sr="$j_def"; else sr="NO_DEFAULT"; fi
     elif [ -z "$sr" ] || [ "$sr" = "---" ] || [ "$sr" = "NOT_A_PROPERTY" ]; then
-        if [ -n "$cur" ]; then sr="NOT_FOUND_IN_BINARY"; else sr="---"; fi
+        if [ -n "$cur" ]; then sr="DYNAMIC_DEFAULT"; else sr="---"; fi
+    elif [ "$sr" = "DYNAMIC_DEFAULT" ]; then
+        local j_def=$(get_dex_default "$p")
+        case "$j_def" in
+            DEFAULT_*) sr="$j_def" ;;
+        esac
     fi
     case "$sr" in "JAVA_FRAMEWORK ("*) sr="${sr#JAVA_FRAMEWORK \(}"; sr="${sr%\)}" ;; JAVA_FRAMEWORK) sr="NO_DEFAULT" ;; esac
     is_junk_prop "$p" "$cur" "$sr" && return 1
@@ -1389,6 +1454,9 @@ build_audit_comb() {
         if ((sr == "---" || sr == "NOT_A_PROPERTY") && (p in fw_file)) {
             sr = (p in dex_def && dex_def[p] != "" && dex_def[p] != "UNKNOWN") ? dex_def[p] : "NO_DEFAULT";
             fl = fw_file[p];
+        } else if (sr == "DYNAMIC_DEFAULT" && (p in dex_def) && dex_def[p] ~ /^DEFAULT_/) {
+            sr = dex_def[p];
+            fl = fw_file[p];
         } else if (sr == "NOT_A_PROPERTY") {
             if (cv == "") next;
             sr = "---"; fl = "";
@@ -1397,7 +1465,7 @@ build_audit_comb() {
 
         sub(/^JAVA_FRAMEWORK \(/, "", sr); sub(/\)$/, "", sr);
         if (sr == "JAVA_FRAMEWORK") sr = "NO_DEFAULT";
-        if (sr == "---" && cv != "") { sr = "NOT_FOUND_IN_BINARY"; fl = ""; }
+        if (sr == "---" && cv != "") { sr = "DYNAMIC_DEFAULT"; fl = ""; }
         if (p == "debug.hwui.renderer" && sr ~ /"skiavk\|skiagl"/) {
             sr = (use_vk == "1" || use_vk == "true") ? "DEFAULT_STR: \"skiavk\"" : "DEFAULT_STR: \"skiagl\"";
         }
@@ -1632,7 +1700,29 @@ scan_and_print_junk() {
     local alive_out="$OVER_TMP_DIR/radar_alive.tmp"
     > "$alive_out"
 
-    if [ -f "$CACHE_FRAMEWORK" ]; then
+    if [ -f "$CACHE_DEX_DEFAULTS" ]; then
+        $AWK_BIN 'NR==FNR {
+            if ($0 !~ /^#/ && $0 !~ /^__DEX_TOKEN__:/) {
+                eq = index($0, "=");
+                if (eq > 0) {
+                    p = substr($0, 1, eq - 1);
+                    v = substr($0, eq + 1);
+                    if (v !~ /^DYNAMIC_SETTER\|/) {
+                        fw[p] = 1;
+                        if (p ~ /^persist\.device_config\.aconfig_flags\./) {
+                            bp = p; sub(/^persist\.device_config\.aconfig_flags\./, "persist.device_config.", bp);
+                            fw[bp] = 1;
+                        } else if (p ~ /^persist\.device_config\./) {
+                            ap = p; sub(/^persist\.device_config\./, "persist.device_config.aconfig_flags.", ap);
+                            fw[ap] = 1;
+                        }
+                    }
+                }
+            }
+            next
+        }
+        { split($0, arr, "="); if (arr[1] in fw) print arr[1] }' "$CACHE_DEX_DEFAULTS" "$cands_out" >> "$alive_out" 2>/dev/null
+    elif [ -f "$CACHE_FRAMEWORK" ]; then
         $AWK_BIN -F'|' 'NR==FNR { if ($1!="") fw[$1]=1; next } { split($0, a, "="); if (a[1] in fw) print a[1] }' "$CACHE_FRAMEWORK" "$cands_out" >> "$alive_out" 2>/dev/null
     fi
     if [ -s "$OVER_TMP_DIR/cache_elf_scan.tmp" ]; then
@@ -1744,9 +1834,34 @@ scan_and_print_junk() {
                     }
                 }
 
-                # 5. Нативный суффикс конкатенации для составных ключей (длина >= 12 с подчеркиванием)
+                # 5. Токены server_configurable_flags / DeviceConfig и связка aconfig_flags <-> базовый флаг
+                if (p ~ /^persist\.device_config\./) {
+                    dc_ns = ""; dc_flag = "";
+                    if (segs[3] == "aconfig_flags" && n >= 5) {
+                        dc_ns = segs[4];
+                        dc_flag = segs[5];
+                        for (i = 6; i <= n; i++) dc_flag = dc_flag "." segs[i];
+                        base_dc = "persist.device_config." dc_ns "." dc_flag;
+                        print base_dc "|" p "|" base_dc;
+                    } else if (segs[3] != "aconfig_flags" && n >= 4) {
+                        dc_ns = segs[3];
+                        dc_flag = segs[4];
+                        for (i = 5; i <= n; i++) dc_flag = dc_flag "." segs[i];
+                        acfg_dc = "persist.device_config.aconfig_flags." dc_ns "." dc_flag;
+                        print acfg_dc "|" p "|" acfg_dc;
+                    }
+                    if (dc_ns != "" && dc_flag != "") {
+                        print dc_ns "." dc_flag "|" p "|" dc_ns "." dc_flag;
+                        print dc_ns "/" dc_flag "|" p "|" dc_ns "/" dc_flag;
+                        if (length(dc_flag) >= 10 && (index(dc_flag, "_") > 0 || index(dc_flag, "-") > 0 || index(dc_flag, ".") > 0)) {
+                            print dc_flag "|" p "|" dc_flag;
+                        }
+                    }
+                }
+
+                # 6. Нативный суффикс конкатенации для составных ключей (длина >= 11 с подчеркиванием или дефисом)
                 last_seg = segs[n];
-                if (length(last_seg) >= 12 && index(last_seg, "_") > 0) {
+                if (length(last_seg) >= 11 && (index(last_seg, "_") > 0 || index(last_seg, "-") > 0)) {
                     print last_seg "|" p "|" last_seg;
                 }
             }' "$cands_not_alive" > "$cand_map" 2>/dev/null
@@ -1757,11 +1872,13 @@ scan_and_print_junk() {
             local persist_rbin="$OVER_CACHE_DIR/radar_bins.cache"
             [ ! -w "$OVER_CACHE_DIR" ] && persist_rbin=""
             local scan_sig=$(stat -c '%Y:%s' "$SCAN" 2>/dev/null)
-            local mod_ver="v1.5"
+            local mod_ver="v1.7"
             [ -f "$MODDIR/module.prop" ] && mod_ver=$(grep -m 1 '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
             local mods_hash=$(cat "$OVER_TMP_DIR/mods.sig" 2>/dev/null | md5sum 2>/dev/null | awk '{print $1}')
             [ -z "$mods_hash" ] && mods_hash=$(cat "$OVER_TMP_DIR/mods.sig" 2>/dev/null | tr '\n' '_')
-            local cur_rbin_sig="$(getprop ro.build.fingerprint)_${mod_ver}_${scan_sig}_${mods_hash}_$(wc -c < "$cand_patterns" 2>/dev/null)"
+            local dtok_sz=0
+            [ -f "$OVER_TMP_DIR/cache_dex_tokens.tmp" ] && dtok_sz=$(wc -c < "$OVER_TMP_DIR/cache_dex_tokens.tmp" 2>/dev/null)
+            local cur_rbin_sig="$(getprop ro.build.fingerprint)_${mod_ver}_${scan_sig}_${mods_hash}_$(wc -c < "$cand_patterns" 2>/dev/null)_${dtok_sz}"
             if [ -f "$rbin_cache" ] && [ "$cur_rbin_sig" = "$(cat "$rbin_sig_f" 2>/dev/null)" ]; then
                 cp "$rbin_cache" "$cand_in_bins" 2>/dev/null
             elif [ -n "$persist_rbin" ] && [ -s "$persist_rbin" ] && [ "$cur_rbin_sig" = "$(head -n 1 "$persist_rbin" 2>/dev/null | cut -d' ' -f3)" ]; then
@@ -1776,7 +1893,7 @@ scan_and_print_junk() {
             else
                 "$SCAN" -f "$cand_patterns" $all_bins > "$cand_in_bins" 2>/dev/null
                 if [ -f "$OVER_TMP_DIR/cache_dex_tokens.tmp" ]; then
-                    $AWK_BIN 'NR==FNR { tok[$0]=1; next } ($0 in tok) { print $0 }' "$OVER_TMP_DIR/cache_dex_tokens.tmp" "$cand_patterns" >> "$cand_in_bins" 2>/dev/null
+                    $AWK_BIN 'NR==FNR { tok[$0]=1; next } { sub(/^STRICT\|/, ""); if ($0 in tok) print $0 }' "$OVER_TMP_DIR/cache_dex_tokens.tmp" "$cand_patterns" >> "$cand_in_bins" 2>/dev/null
                 fi
                 cp "$cand_in_bins" "$rbin_cache" 2>/dev/null
                 echo "$cur_rbin_sig" > "$rbin_sig_f"
@@ -1795,7 +1912,20 @@ scan_and_print_junk() {
 
     local cands_clean="$OVER_TMP_DIR/radar_cands_clean.tmp"
     if [ -s "$alive_out" ]; then
-        $AWK_BIN 'NR==FNR { if ($1!="") alive[$1]=1; next } { split($0, a, "="); if (!alive[a[1]]) print $0 }' "$alive_out" "$cands_out" > "$cands_clean" 2>/dev/null
+        $AWK_BIN 'NR==FNR {
+            if ($1 != "") {
+                alive[$1] = 1;
+                if ($1 ~ /^persist\.device_config\.aconfig_flags\./) {
+                    bp = $1; sub(/^persist\.device_config\.aconfig_flags\./, "persist.device_config.", bp);
+                    alive[bp] = 1;
+                } else if ($1 ~ /^persist\.device_config\./) {
+                    ap = $1; sub(/^persist\.device_config\./, "persist.device_config.aconfig_flags.", ap);
+                    alive[ap] = 1;
+                }
+            }
+            next
+        }
+        { split($0, arr, "="); if (!alive[arr[1]]) print $0 }' "$alive_out" "$cands_out" > "$cands_clean" 2>/dev/null
     else
         cp -f "$cands_out" "$cands_clean" 2>/dev/null
     fi

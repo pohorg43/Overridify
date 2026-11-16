@@ -131,7 +131,7 @@ static inline int get_symbol_property_api_type(const char *name, int *out_key_re
         if (out_key_reg) *out_key_reg = 1;
         return API_TYPE_STR;
     }
-    if (strstr(name, "PerfConfigDataStore")) {
+    if (strstr(name, "PerfConfigDataStore") || strstr(name, "ServerConfigurableFlag")) {
         if (out_key_reg) *out_key_reg = 1;
         return API_TYPE_STR;
     }
@@ -146,7 +146,7 @@ static inline int get_symbol_property_api_type(const char *name, int *out_key_re
         strstr(name, "__system_property_find") || strstr(name, "__system_property_read")) return API_TYPE_STR;
     if (strstr(name, "SetProperty") || strstr(name, "property_set") || strstr(name, "__system_property_set") ||
         strstr(name, "WaitForProperty")) return API_TYPE_GENERIC;
-    if (strstr(name, "sysprop") || strstr(name, "system_properties")) return API_TYPE_GENERIC;
+    if (strstr(name, "sysprop") || strstr(name, "system_properties") || strstr(name, "aconfig_storage")) return API_TYPE_GENERIC;
     return API_TYPE_NONE;
 }
 
@@ -623,7 +623,7 @@ static int is_call_to_property_api(ElfContext *ctx, uint64_t call_vaddr, int dep
             const char *fn = get_vaddr_symbol_name(ctx, nested);
             
             if (fn && strstr(fn, "__system_property_wait")) {
-                return 0;
+                continue;
             }
             if (fn) {
                 if (strstr(fn, "strtol") || strstr(fn, "atoi") || strstr(fn, "strtoll") || strstr(fn, "strtoul") || strstr(fn, "atol")) {
@@ -1978,6 +1978,24 @@ static uint32_t fnv1a(const char *s) {
     return h;
 }
 
+static inline uint32_t fnv1a_len(const char *s, size_t len) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < len; i++) { h ^= (unsigned char)s[i]; h *= 16777619u; }
+    return h;
+}
+
+static inline int is_valid_rust_str_slice(const uint8_t *s, size_t len) {
+    if (len < 3 || len > 120) return 0;
+    uint8_t c0 = s[0];
+    if (!((c0 >= 'a' && c0 <= 'z') || c0 == '%')) return 0;
+    for (size_t k = 1; k < len; k++) {
+        uint8_t ch = s[k];
+        if (!(isalnum(ch) || ch == '.' || ch == '_' || ch == '-' || ch == '%' || ch == '{' || ch == '}'))
+            return 0;
+    }
+    return 1;
+}
+
 static uint64_t g_seen_ino[16384];
 
 static void *mt_worker(void *arg) {
@@ -2009,7 +2027,8 @@ static void *mt_worker(void *arg) {
         Elf64_Ehdr *ehdr = (Elf64_Ehdr *)data;
         if (memcmp(ehdr->e_ident, ELFMAG, SELFMAG) || ehdr->e_ident[EI_CLASS] != ELFCLASS64 ||
             !is_valid_range(data, size, data + ehdr->e_phoff, (size_t)ehdr->e_phnum * sizeof(Elf64_Phdr))) {
-            if (is_radar) {
+            // В режиме Радара фоллбэк разрешён только для 32-битных ELF (\x7fELF), исключая .apk/.jar/.dex/.vdex/.pb
+            if (is_radar && !memcmp(ehdr->e_ident, ELFMAG, SELFMAG)) {
                 size_t i = 0;
                 while (i < size) {
                     if (!isprint(data[i])) { i++; continue; }
@@ -2036,13 +2055,19 @@ static void *mt_worker(void *arg) {
         Elf64_Phdr *phdr = (Elf64_Phdr *)(data + ehdr->e_phoff);
         ElfContext ctx;
         init_elf_context(&ctx, data, size, ehdr, phdr);
-        if (!ctx.has_property_api && !ctx.dlsym_got && !ctx.guard_got_cnt) {
+        if (!is_radar && !ctx.has_property_api && !ctx.dlsym_got && !ctx.guard_got_cnt && ctx.sym_count > 0) {
             munmap((void*)data, size); continue;
+        }
+        int has_ro_seg = 0;
+        for (int p = 0; p < ehdr->e_phnum; p++) {
+            if (phdr[p].p_type == PT_LOAD && !(phdr[p].p_flags & PF_X) && !(phdr[p].p_flags & PF_W)) {
+                has_ro_seg = 1; break;
+            }
         }
         size_t qcap = 256; int qcnt = 0, active = 0; uint64_t bloom = 0;
         PropQuery *qs = calloc(qcap, sizeof(PropQuery));
         for (int p = 0; p < ehdr->e_phnum && qs; p++) {
-            if (phdr[p].p_type != PT_LOAD || (phdr[p].p_flags & PF_X) || phdr[p].p_offset >= size) continue;
+            if (phdr[p].p_type != PT_LOAD || (has_ro_seg && (phdr[p].p_flags & PF_X)) || phdr[p].p_offset >= size) continue;
             size_t slen = phdr[p].p_filesz; if (phdr[p].p_offset + slen > size) slen = size - phdr[p].p_offset;
             const uint8_t *seg = data + phdr[p].p_offset;
             size_t start = 0;
@@ -2052,9 +2077,47 @@ static void *mt_worker(void *arg) {
                 const uint8_t *nul = memchr(seg + start, '\0', slen - start);
                 if (!nul) break;
                 size_t l = (size_t)(nul - (seg + start));
-                if (!(l >= 3 && l <= 120 && ((c0 >= 'a' && c0 <= 'z') || (is_radar && c0 == '%')))) {
+                int clean_str = (l >= 3 && l <= 120 && ((c0 >= 'a' && c0 <= 'z') || (is_radar && c0 == '%')));
+                if (clean_str) {
+                    for (size_t k = 1; k < l; k++) {
+                        uint8_t ch = seg[start + k];
+                        if (!(isalnum(ch) || ch == '.' || ch == '_' || ch == '-' || (is_radar && (ch == '%' || ch == '{' || ch == '}')))) {
+                            clean_str = 0; break;
+                        }
+                    }
+                }
+                if (!clean_str) {
+                    if (is_radar) {
+                        const uint8_t *cur_p = seg + start;
+                        while (cur_p < nul) {
+                            while (cur_p < nul && !(isalnum(*cur_p) || *cur_p == '.' || *cur_p == '_' || *cur_p == '-' || *cur_p == '%' || *cur_p == '{' || *cur_p == '}')) cur_p++;
+                            const uint8_t *tok_s = cur_p;
+                            while (cur_p < nul && (isalnum(*cur_p) || *cur_p == '.' || *cur_p == '_' || *cur_p == '-' || *cur_p == '%' || *cur_p == '{' || *cur_p == '}')) cur_p++;
+                            if (tok_s < cur_p) {
+                                size_t tl = (size_t)(cur_p - tok_s);
+                                if (is_valid_rust_str_slice(tok_s, tl)) {
+                                    uint32_t h = fnv1a_len((const char *)tok_s, tl) & (g_radar_hsize - 1);
+                                    while (g_radar_ht[h] != -1) {
+                                        int pidx = g_radar_ht[h];
+                                        if (!strncmp(g_radar_pats[pidx], (const char *)tok_s, tl) && g_radar_pats[pidx][tl] == '\0') {
+                                            if (!g_radar_strict[pidx] && !is_aidl_or_type_descriptor(g_radar_pats[pidx])) {
+                                                __sync_lock_test_and_set(&g_radar_alive[pidx], 1);
+                                            } else if (!g_radar_alive[pidx] && !is_aidl_or_type_descriptor(g_radar_pats[pidx])) {
+                                                if ((size_t)qcnt >= qcap) { qcap *= 2; qs = realloc(qs, qcap * sizeof(PropQuery)); }
+                                                uint64_t v = file_offset_to_vaddr(ehdr, phdr, phdr[p].p_offset + (size_t)(tok_s - seg));
+                                                qs[qcnt] = (PropQuery){g_radar_pats[pidx], v, v & ~0xFFFULL, v & 0xFFFULL, 1, pidx, "NOT_A_PROPERTY"};
+                                                bloom |= (1ULL << ((qs[qcnt].page >> 12) & 63)); qcnt++; active++;
+                                            }
+                                            break;
+                                        }
+                                        h = (h + 1) & (g_radar_hsize - 1);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     const uint8_t *tp = nul - 1;
-                    while (tp >= seg + start && (isalnum(*tp) || *tp == '.' || *tp == '_' || *tp == '-')) tp--;
+                    while (tp >= seg + start && (isalnum(*tp) || *tp == '.' || *tp == '_' || *tp == '-' || (is_radar && (*tp == '%' || *tp == '{' || *tp == '}')))) tp--;
                     tp++;
                     if (tp >= seg + start && tp < nul) {
                         size_t tl = (size_t)(nul - tp);
@@ -2063,10 +2126,11 @@ static void *mt_worker(void *arg) {
                             start = (size_t)(tp - seg);
                             c0 = tc;
                             l = tl;
+                            clean_str = 1;
                         }
                     }
                 }
-                if (l >= 3 && l <= 120 && ((c0 >= 'a' && c0 <= 'z') || (is_radar && c0 == '%'))) {
+                if (clean_str && l >= 3 && l <= 120 && ((c0 >= 'a' && c0 <= 'z') || (is_radar && c0 == '%'))) {
                     const char *s = (const char *)(seg + start);
                     if (is_radar) {
                         uint32_t h = fnv1a(s) & (g_radar_hsize - 1);
@@ -2126,7 +2190,21 @@ static void *mt_worker(void *arg) {
 // ============================================================================
 // Нативный многопоточный декодер байткода Dalvik (.dex внутри .jar / .apk)
 // ============================================================================
-enum DexPropApi { DEX_API_NONE = 0, DEX_API_BOOL, DEX_API_INT, DEX_API_LONG, DEX_API_STR1, DEX_API_STR2, DEX_API_SET, DEX_API_PERF };
+enum DexPropApi {
+    DEX_API_NONE = 0,
+    DEX_API_BOOL,
+    DEX_API_INT,
+    DEX_API_LONG,
+    DEX_API_STR1,
+    DEX_API_STR2,
+    DEX_API_SET,
+    DEX_API_PERF,
+    DEX_API_DC_BOOL,
+    DEX_API_DC_INT,
+    DEX_API_DC_LONG,
+    DEX_API_DC_STR,
+    DEX_API_DC_PROP1
+};
 
 typedef struct {
     const uint8_t *zip_data;
@@ -2135,6 +2213,7 @@ typedef struct {
     uint16_t method;
     const char *jar_name;
     char *out_buf;
+    int *map_ref;
 } DexTask;
 
 static DexTask *g_dex_tasks = NULL;
@@ -2167,6 +2246,16 @@ static const char *dex_get_str(const uint8_t *dex, size_t dex_sz, const uint32_t
     return (const char *)p;
 }
 
+static inline int is_dex_token_str(const char *s, size_t len) {
+    if (!s || len < 2 || len > 91) return 0;
+    if (!isalnum((unsigned char)s[0]) || !isalnum((unsigned char)s[len - 1])) return 0;
+    for (size_t i = 0; i < len; i++) {
+        char ch = s[i];
+        if (!(isalnum((unsigned char)ch) || ch == '.' || ch == '_' || ch == '-' || ch == '/')) return 0;
+    }
+    return 1;
+}
+
 static int is_dex_prop_cand(const char *s, size_t len) {
     if (!is_candidate_prop_syntax(s, len)) return 0;
     return 1;
@@ -2184,6 +2273,101 @@ static int32_t dex_find_str_bsearch(const uint8_t *dex, size_t dex_sz, const uin
         else low = mid + 1;
     }
     return -1;
+}
+
+static int dex_has_prefix_bsearch(const uint8_t *dex, size_t dex_sz, const uint32_t *str_ids, uint32_t str_cnt, const char *pref, size_t plen) {
+    int32_t low = 0, high = (int32_t)str_cnt - 1;
+    while (low <= high) {
+        int32_t mid = low + (high - low) / 2;
+        const char *s = dex_get_str(dex, dex_sz, str_ids, str_cnt, (uint32_t)mid, NULL);
+        if (!s) return 0;
+        int cmp = strncmp(pref, s, plen);
+        if (cmp == 0) return 1;
+        if (cmp < 0) high = mid - 1;
+        else low = mid + 1;
+    }
+    return 0;
+}
+
+static uint8_t dex_proto_to_wrap_api(const uint8_t *dex, size_t dex_sz, const uint32_t *str_ids, uint32_t str_cnt,
+                                     uint32_t proto_off, uint32_t proto_cnt, uint16_t p_idx, int32_t str_type_idx, int is_dc) {
+    if (p_idx >= proto_cnt) return DEX_API_NONE;
+    const uint32_t *pr = (const uint32_t *)(dex + proto_off + p_idx * 12);
+    uint32_t sh_idx = pr[0], ret_type = pr[1], param_off = pr[2];
+    if (!param_off || (uint64_t)param_off + 6 > dex_sz) return DEX_API_NONE;
+    uint32_t p_cnt = *(const uint32_t *)(dex + param_off);
+    if (p_cnt < 1 || p_cnt > 6 || (uint64_t)param_off + 4 + p_cnt * 2 > dex_sz) return DEX_API_NONE;
+    const uint16_t *ptypes = (const uint16_t *)(dex + param_off + 4);
+    if (str_type_idx >= 0) {
+        int has_s = 0;
+        for (uint32_t i = 0; i < p_cnt; i++) {
+            if (ptypes[i] == (uint16_t)str_type_idx) { has_s = 1; break; }
+        }
+        if (!has_s) return DEX_API_NONE;
+    }
+    const char *sh = dex_get_str(dex, dex_sz, str_ids, str_cnt, sh_idx, NULL);
+    if (!sh || !sh[0]) return DEX_API_NONE;
+    if (is_dc) {
+        if (p_cnt == 1 || (p_cnt == 2 && ptypes[1] != (uint16_t)str_type_idx)) return DEX_API_DC_PROP1;
+        if (sh[0] == 'Z') return DEX_API_DC_BOOL;
+        if (sh[0] == 'I') return DEX_API_DC_INT;
+        if (sh[0] == 'J') return DEX_API_DC_LONG;
+        if (sh[0] == 'F' || sh[0] == 'L') return DEX_API_DC_STR;
+        return DEX_API_NONE;
+    }
+    if (sh[0] == 'Z' && (p_cnt >= 1 && p_cnt <= 4)) return DEX_API_BOOL;
+    if (sh[0] == 'I' && (p_cnt >= 1 && p_cnt <= 4)) return DEX_API_INT;
+    if (sh[0] == 'J' && (p_cnt >= 1 && p_cnt <= 4)) return DEX_API_LONG;
+    if (sh[0] == 'F' && (p_cnt >= 1 && p_cnt <= 4)) return DEX_API_STR1;
+    if (sh[0] == 'L' && (str_type_idx < 0 || ret_type == (uint32_t)str_type_idx)) {
+        if (p_cnt == 1) return DEX_API_STR1;
+        if (p_cnt >= 2 && p_cnt <= 4) return DEX_API_STR2;
+    }
+    if (!strcmp(sh, "VLL")) return DEX_API_SET;
+    return DEX_API_NONE;
+}
+
+static uint8_t check_multidex_static_getter(const uint8_t *dex, size_t dex_sz, const uint32_t *str_ids, uint32_t str_cnt,
+                                            const uint32_t *type_ids, uint32_t type_cnt, uint32_t proto_off, uint32_t proto_cnt,
+                                            uint32_t meth_off, uint32_t meth_cnt, uint16_t midx, int32_t str_type_idx, const char *pname) {
+    if (midx >= meth_cnt || !pname) return DEX_API_NONE;
+    if (strncmp(pname, "persist.", 8) && strncmp(pname, "ro.", 3) &&
+        strncmp(pname, "sys.", 4) && strncmp(pname, "debug.", 6) && strncmp(pname, "vendor.", 7)) {
+        return DEX_API_NONE;
+    }
+    const uint16_t *mid = (const uint16_t *)(dex + meth_off + midx * 8);
+    uint16_t c_idx = mid[0], p_idx = mid[1];
+    uint32_t n_idx = *(const uint32_t *)(mid + 2);
+    if (c_idx >= type_cnt || p_idx >= proto_cnt) return DEX_API_NONE;
+
+    const char *cdesc = dex_get_str(dex, dex_sz, str_ids, str_cnt, type_ids[c_idx], NULL);
+    const char *mname = dex_get_str(dex, dex_sz, str_ids, str_cnt, n_idx, NULL);
+    if (!cdesc || !mname) return DEX_API_NONE;
+
+    if (!strncmp(cdesc, "Ljava/", 6) || !strncmp(cdesc, "Ljavax/", 7) || !strncmp(cdesc, "Lkotlin/", 8) ||
+        !strncmp(cdesc, "Ldalvik/", 8) || !strncmp(cdesc, "Lorg/json/", 10) || !strncmp(cdesc, "Landroid/text/", 14) ||
+        !strncmp(cdesc, "Landroid/util/", 14) || !strncmp(cdesc, "Landroid/os/Bundle", 18) ||
+        !strncmp(cdesc, "Landroid/os/BaseBundle", 22) || !strncmp(cdesc, "Landroid/content/", 17) ||
+        !strncmp(cdesc, "Landroid/net/", 13) || !strncmp(cdesc, "Landroid/database/", 18) ||
+        strstr(cdesc, "Settings") || strstr(cdesc, "Log") || strstr(cdesc, "Json") || strstr(cdesc, "JSON") ||
+        strstr(cdesc, "Prefs") || strstr(cdesc, "Preferences")) {
+        return DEX_API_NONE;
+    }
+    if (!strncmp(mname, "set", 3) || !strncmp(mname, "put", 3) || !strncmp(mname, "write", 5) ||
+        !strncmp(mname, "parse", 5) || !strncmp(mname, "valueOf", 7) || !strncmp(mname, "format", 6) ||
+        !strncmp(mname, "check", 5) || !strncmp(mname, "enforce", 7) || !strncmp(mname, "remove", 6) ||
+        !strncmp(mname, "delete", 6) || !strncmp(mname, "clear", 5) || !strncmp(mname, "log", 3) ||
+        !strncmp(mname, "print", 5) || !strncmp(mname, "opt", 3) || !strncmp(mname, "create", 6) ||
+        !strncmp(mname, "init", 4) || !strncmp(mname, "notify", 6) || !strncmp(mname, "send", 4) ||
+        !strncmp(mname, "post", 4) || !strncmp(mname, "register", 8) || !strncmp(mname, "add", 3) ||
+        !strncmp(mname, "append", 6) || !strncmp(mname, "split", 5) || !strncmp(mname, "contains", 8) ||
+        !strncmp(mname, "equals", 6)) {
+        return DEX_API_NONE;
+    }
+    uint8_t w_api = dex_proto_to_wrap_api(dex, dex_sz, str_ids, str_cnt, proto_off, proto_cnt, p_idx, str_type_idx, 0);
+    if (w_api == DEX_API_SET) return DEX_API_NONE;
+    if (w_api == DEX_API_STR2 && strlen(mname) > 3 && strncmp(mname, "get", 3) != 0) return DEX_API_NONE;
+    return w_api;
 }
 
 static int dalvik_insn_width(const uint16_t *insns, uint32_t pc, uint32_t insns_sz) {
@@ -2213,6 +2397,34 @@ static int dalvik_insn_width(const uint16_t *insns, uint32_t pc, uint32_t insns_
     return 3;
 }
 
+static inline int is_lowercase_flag_token(const char *s, size_t len) {
+    if (!s || len < 10 || len > 72) return 0;
+    if (s[0] < 'a' || s[0] > 'z') return 0;
+    char last = s[len - 1];
+    if (!((last >= 'a' && last <= 'z') || (last >= '0' && last <= '9'))) return 0;
+    int has_sep = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (c == '_' || c == '-' || c == '/') has_sep = 1;
+        else if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.')) return 0;
+    }
+    return has_sep;
+}
+
+static void emit_dex_dc_token(FILE *out, const char *s, size_t slen, const char *jar_name) {
+    if (!s || slen < 10 || !is_dex_token_str(s, slen)) return;
+    if (!strchr(s, '_') && !strchr(s, '-') && !strchr(s, '/')) return;
+    fprintf(out, "__DEX_TOKEN__:%s=DYNAMIC_DEFAULT|%s\n", s, jar_name);
+    const char *slash = strrchr(s, '/');
+    if (slash && strlen(slash + 1) >= 10 && (strchr(slash + 1, '_') || strchr(slash + 1, '-'))) {
+        fprintf(out, "__DEX_TOKEN__:%s=DYNAMIC_DEFAULT|%s\n", slash + 1, jar_name);
+    }
+    const char *dot = strrchr(s, '.');
+    if (dot && strlen(dot + 1) >= 10 && (strchr(dot + 1, '_') || strchr(dot + 1, '-'))) {
+        fprintf(out, "__DEX_TOKEN__:%s=DYNAMIC_DEFAULT|%s\n", dot + 1, jar_name);
+    }
+}
+
 static void parse_dex_buffer(const uint8_t *dex, size_t dex_sz, const char *jar_name, FILE *out) {
     if (dex_sz < 112 || memcmp(dex, "dex\n", 4) != 0) return;
     const uint32_t *hdr = (const uint32_t *)dex;
@@ -2231,23 +2443,61 @@ static void parse_dex_buffer(const uint8_t *dex, size_t dex_sz, const char *jar_
     const uint32_t *str_ids = (const uint32_t *)(dex + str_off);
     const uint32_t *type_ids = (const uint32_t *)(dex + type_off);
 
-    int32_t str_perf = dex_find_str_bsearch(dex, dex_sz, str_ids, str_cnt, "perfGetProp");
+    int has_writable_flags = 0;
+    for (uint32_t c = 0; c < cls_cnt; c++) {
+        uint32_t c_type_idx = *(const uint32_t *)(dex + cls_off + c * 32);
+        const char *cdesc = (c_type_idx < type_cnt) ? dex_get_str(dex, dex_sz, str_ids, str_cnt, type_ids[c_type_idx], NULL) : NULL;
+        if (cdesc && strstr(cdesc, "WritableFlags")) { has_writable_flags = 1; break; }
+    }
+    if (!has_writable_flags) {
+        for (uint32_t i = 0; i < str_cnt; i++) {
+            size_t slen = 0;
+            const char *s = dex_get_str(dex, dex_sz, str_ids, str_cnt, i, &slen);
+            if (!s || slen < 6 || slen > 91) continue;
+            if ((!strncmp(s, "ro.", 3) || !strncmp(s, "persist.", 8)) && is_dex_prop_cand(s, slen)) {
+                fprintf(out, "__DEX_TOKEN__:%s=DYNAMIC_DEFAULT|%s\n", s, jar_name);
+            } else if (is_lowercase_flag_token(s, slen)) {
+                emit_dex_dc_token(out, s, slen, jar_name);
+            }
+        }
+    }
 
-    // Универсальный Zero-Hardcode поиск ЛЮБЫХ классов свойств (*SystemProperties;) по таблице типов (всего 1000-2000 записей)
+    int32_t str_perf = dex_find_str_bsearch(dex, dex_sz, str_ids, str_cnt, "perfGetProp");
+    int32_t str_sysprop_dot = dex_find_str_bsearch(dex, dex_sz, str_ids, str_cnt, "android.os.SystemProperties");
+    int32_t str_jls = dex_find_str_bsearch(dex, dex_sz, str_ids, str_cnt, "Ljava/lang/String;");
+    int32_t str_on_prop_chg = dex_find_str_bsearch(dex, dex_sz, str_ids, str_cnt, "onPropertiesChanged");
+    int32_t str_type_idx = -1;
+
+    // 1 = *SystemProperties*, 2 = *DeviceConfig; / *DeviceConfigUtils;, 3 = *DeviceConfig$Properties; / *AconfigPackage; / *FeatureFlagUtils; / *OnPropertiesChangedListener;
     uint8_t *is_prop_type = calloc(type_cnt, 1);
     if (!is_prop_type) return;
     int has_any_prop_class = 0;
 
     for (uint32_t t = 0; t < type_cnt; t++) {
         uint32_t desc_idx = type_ids[t];
+        if (str_jls >= 0 && desc_idx == (uint32_t)str_jls) str_type_idx = (int32_t)t;
         const char *desc = dex_get_str(dex, dex_sz, str_ids, str_cnt, desc_idx, NULL);
-        if (desc && strstr(desc, "SystemProperties;")) {
+        if (!desc) continue;
+        if (strstr(desc, "SystemProperties")) {
             is_prop_type[t] = 1;
+            has_any_prop_class = 1;
+        } else if (strstr(desc, "DeviceConfig;") || strstr(desc, "DeviceConfigUtils;")) {
+            is_prop_type[t] = 2;
+            has_any_prop_class = 1;
+        } else if (strstr(desc, "DeviceConfig$Properties;") || strstr(desc, "AconfigPackage;") ||
+                   strstr(desc, "FeatureFlagUtils;") || strstr(desc, "OnPropertiesChangedListener;")) {
+            is_prop_type[t] = 3;
             has_any_prop_class = 1;
         }
     }
 
-    if (!has_any_prop_class && str_perf < 0) {
+    int has_prop_strs = dex_has_prefix_bsearch(dex, dex_sz, str_ids, str_cnt, "persist.", 8) ||
+                        dex_has_prefix_bsearch(dex, dex_sz, str_ids, str_cnt, "ro.", 3) ||
+                        dex_has_prefix_bsearch(dex, dex_sz, str_ids, str_cnt, "sys.", 4) ||
+                        dex_has_prefix_bsearch(dex, dex_sz, str_ids, str_cnt, "debug.", 6) ||
+                        dex_has_prefix_bsearch(dex, dex_sz, str_ids, str_cnt, "vendor.", 7);
+
+    if (!has_any_prop_class && str_perf < 0 && str_sysprop_dot < 0 && !has_prop_strs) {
         free(is_prop_type);
         return;
     }
@@ -2266,9 +2516,11 @@ static void parse_dex_buffer(const uint8_t *dex, size_t dex_sz, const char *jar_
             meth_api[m] = DEX_API_PERF; has_any_api = 1; continue;
         }
 
-        if (is_prop_type[c_idx]) {
-            const char *mname = dex_get_str(dex, dex_sz, str_ids, str_cnt, n_idx, NULL);
-            if (!mname) continue;
+        uint8_t pt = is_prop_type[c_idx];
+        const char *mname = dex_get_str(dex, dex_sz, str_ids, str_cnt, n_idx, NULL);
+        if (!mname) continue;
+
+        if (pt == 1) {
             if (!strcmp(mname, "getBoolean")) { meth_api[m] = DEX_API_BOOL; has_any_api = 1; }
             else if (!strcmp(mname, "getInt")) { meth_api[m] = DEX_API_INT; has_any_api = 1; }
             else if (!strcmp(mname, "getLong")) { meth_api[m] = DEX_API_LONG; has_any_api = 1; }
@@ -2279,31 +2531,253 @@ static void parse_dex_buffer(const uint8_t *dex, size_t dex_sz, const char *jar_
                 meth_api[m] = (sh && !strcmp(sh, "LLL")) ? DEX_API_STR2 : DEX_API_STR1;
                 has_any_api = 1;
             }
+        } else if (pt == 2) {
+            if (!strcmp(mname, "getBoolean") || !strncmp(mname, "isFeatureEnabled", 16) ||
+                !strncmp(mname, "isTetheringFeature", 18)) {
+                meth_api[m] = DEX_API_DC_BOOL; has_any_api = 1;
+            }
+            else if (!strcmp(mname, "getInt") || !strcmp(mname, "getDeviceConfigPropertyInt")) {
+                meth_api[m] = DEX_API_DC_INT; has_any_api = 1;
+            }
+            else if (!strcmp(mname, "getLong")) { meth_api[m] = DEX_API_DC_LONG; has_any_api = 1; }
+            else if (!strcmp(mname, "getFloat") || !strcmp(mname, "getString") ||
+                     !strcmp(mname, "getProperty") || !strcmp(mname, "getProperties") ||
+                     !strcmp(mname, "getDeviceConfigPropertyBoolean")) {
+                meth_api[m] = DEX_API_DC_STR; has_any_api = 1;
+            }
+        } else if (pt == 3) {
+            if (!strcmp(mname, "getBoolean") || !strcmp(mname, "getInt") ||
+                !strcmp(mname, "getLong") || !strcmp(mname, "getFloat") ||
+                !strcmp(mname, "getString") || !strcmp(mname, "getBooleanFlagValue") ||
+                !strcmp(mname, "getKeyset") || !strcmp(mname, "isEnabled") ||
+                !strcmp(mname, "onPropertiesChanged")) {
+                meth_api[m] = DEX_API_DC_PROP1; has_any_api = 1;
+            }
+        } else if (!strncmp(mname, "getDeviceConfigProperty", 23)) {
+            if (strstr(mname, "Boolean")) meth_api[m] = DEX_API_DC_BOOL;
+            else if (strstr(mname, "Int")) meth_api[m] = DEX_API_DC_INT;
+            else if (strstr(mname, "Long")) meth_api[m] = DEX_API_DC_LONG;
+            else meth_api[m] = DEX_API_DC_STR;
+            has_any_api = 1;
         }
     }
     free(is_prop_type);
 
-    if (!has_any_api) { free(meth_api); return; }
-
     const char **field_prop = field_cnt > 0 ? calloc(field_cnt, sizeof(const char *)) : NULL;
+    const uint8_t *dex_end = dex + dex_sz;
+
+    // Проход 1: индексация static_values_off / sput-object и обнаружение R8/ProGuard-обёрток
+    for (int hop = 0; hop < 2; hop++) {
+        int added_wrappers = 0;
+        for (uint32_t c = 0; c < cls_cnt; c++) {
+            uint32_t c_type_idx = *(const uint32_t *)(dex + cls_off + c * 32);
+            uint32_t cdata_off = *(const uint32_t *)(dex + cls_off + c * 32 + 24);
+            uint32_t sval_off = *(const uint32_t *)(dex + cls_off + c * 32 + 28);
+            if (!cdata_off || cdata_off >= dex_sz) continue;
+
+            const uint8_t *p = dex + cdata_off;
+            uint32_t sf_cnt = read_uleb128(&p, dex_end);
+            uint32_t if_cnt = read_uleb128(&p, dex_end);
+            uint32_t dm_cnt = read_uleb128(&p, dex_end);
+            uint32_t vm_cnt = read_uleb128(&p, dex_end);
+
+            uint32_t sf_idx = 0;
+            const uint8_t *svp = (hop == 0 && field_prop && sval_off > 0 && sval_off < dex_sz) ? (dex + sval_off) : NULL;
+            uint32_t sv_cnt = svp ? read_uleb128(&svp, dex_end) : 0;
+
+            for (uint32_t i = 0; i < sf_cnt && p < dex_end; i++) {
+                sf_idx += read_uleb128(&p, dex_end);
+                read_uleb128(&p, dex_end);
+                if (svp && i < sv_cnt && svp < dex_end) {
+                    uint8_t hdr_b = *svp++;
+                    uint8_t vtype = hdr_b & 0x1f;
+                    uint8_t varg = (hdr_b >> 5) & 0x7;
+                    if (vtype == 0x1e || vtype == 0x1f) {
+                        continue;
+                    } else if (vtype == 0x17 && svp + varg + 1 <= dex_end) {
+                        uint32_t sidx = 0;
+                        for (uint8_t b = 0; b <= varg; b++) sidx |= ((uint32_t)svp[b] << (b * 8));
+                        svp += varg + 1;
+                        if (sf_idx < field_cnt) {
+                            size_t slen = 0;
+                            const char *s = dex_get_str(dex, dex_sz, str_ids, str_cnt, sidx, &slen);
+                            if (s && is_dex_token_str(s, slen)) field_prop[sf_idx] = s;
+                        }
+                    } else if ((vtype <= 0x06 || (vtype >= 0x10 && vtype <= 0x1b)) && svp + varg + 1 <= dex_end) {
+                        svp += varg + 1;
+                    } else {
+                        svp = NULL;
+                    }
+                }
+            }
+            for (uint32_t i = 0; i < if_cnt * 2 && p < dex_end; i++) read_uleb128(&p, dex_end);
+
+            uint32_t total_m = dm_cnt + vm_cnt;
+            uint32_t m_id = 0;
+            int cls_has_refl_sysprop = 0;
+
+            for (uint32_t m = 0; m < total_m && p < dex_end; m++) {
+                if (m == dm_cnt) m_id = 0;
+                m_id += read_uleb128(&p, dex_end);
+                read_uleb128(&p, dex_end);
+                uint32_t code_off = read_uleb128(&p, dex_end);
+                if (!code_off || (uint64_t)code_off + 16 > dex_sz || m_id >= meth_cnt) continue;
+
+                uint32_t insns_sz = *(const uint32_t *)(dex + code_off + 12);
+                if (!insns_sz || (uint64_t)code_off + 16 + (uint64_t)insns_sz * 2 > dex_sz) continue;
+                const uint16_t *insns = (const uint16_t *)(dex + code_off + 16);
+
+                int m_has_cand = 0, m_loads_refl = 0;
+                uint8_t called_api = 0;
+
+                for (uint32_t pc = 0; pc < insns_sz; ) {
+                    uint16_t inst = insns[pc];
+                    uint8_t op = inst & 0xFF;
+                    int w = dalvik_insn_width(insns, pc, insns_sz);
+                    if (w <= 0 || pc + w > insns_sz) break;
+
+                    if (op == 0x1a || op == 0x1b) {
+                        uint32_t sidx = (op == 0x1a) ? insns[pc + 1] : ((uint32_t)insns[pc + 1] | ((uint32_t)insns[pc + 2] << 16));
+                        if (str_sysprop_dot >= 0 && sidx == (uint32_t)str_sysprop_dot) {
+                            m_loads_refl = 1;
+                            cls_has_refl_sysprop = 1;
+                        }
+                        size_t slen = 0;
+                        const char *s = dex_get_str(dex, dex_sz, str_ids, str_cnt, sidx, &slen);
+                        if (s) {
+                            if (is_dex_prop_cand(s, slen)) m_has_cand = 1;
+                            if (hop == 0 && field_prop && op == 0x1a && pc + 2 < insns_sz &&
+                                (insns[pc + 2] & 0xFF) == 0x69 && (insns[pc + 2] >> 8) == (inst >> 8)) {
+                                uint16_t fidx = insns[pc + 3];
+                                if (fidx < field_cnt && is_dex_token_str(s, slen)) field_prop[fidx] = s;
+                            }
+                        }
+                    } else if (((op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) && insns[pc + 1] < meth_cnt) {
+                        uint8_t ca = meth_api[insns[pc + 1]];
+                        if (ca) called_api = ca;
+                    }
+                    pc += w;
+                }
+
+                if (!meth_api[m_id] && !m_has_cand && insns_sz <= 128 && (called_api || m_loads_refl)) {
+                    const uint16_t *mid = (const uint16_t *)(dex + meth_off + m_id * 8);
+                    int is_dc = (called_api >= DEX_API_DC_BOOL && called_api <= DEX_API_DC_PROP1);
+                    uint8_t w_api = dex_proto_to_wrap_api(dex, dex_sz, str_ids, str_cnt, proto_off, proto_cnt, mid[1], str_type_idx, is_dc);
+                    if (w_api) {
+                        meth_api[m_id] = w_api;
+                        has_any_api = 1;
+                        added_wrappers = 1;
+                    }
+                }
+            }
+
+            if (cls_has_refl_sysprop && total_m <= 40) {
+                for (uint32_t m = 0; m < meth_cnt; m++) {
+                    const uint16_t *mid = (const uint16_t *)(dex + meth_off + m * 8);
+                    if (mid[0] == c_type_idx && !meth_api[m]) {
+                        uint8_t w_api = dex_proto_to_wrap_api(dex, dex_sz, str_ids, str_cnt, proto_off, proto_cnt, mid[1], str_type_idx, 0);
+                        if (w_api) {
+                            meth_api[m] = w_api;
+                            has_any_api = 1;
+                            added_wrappers = 1;
+                        }
+                    }
+                }
+            }
+        }
+        if (!added_wrappers) break;
+    }
+
+    if (!has_any_api && str_sysprop_dot < 0 && !has_prop_strs) {
+        if (field_prop) free(field_prop);
+        free(meth_api);
+        return;
+    }
+
     int64_t val_int[256];
     const char *val_str[256];
     uint8_t has_int[256], has_str[256], is_cand[256];
-    const uint8_t *dex_end = dex + dex_sz;
 
     for (uint32_t c = 0; c < cls_cnt; c++) {
+        uint16_t c_type_idx = *(const uint16_t *)(dex + cls_off + c * 32);
         uint32_t cdata_off = *(const uint32_t *)(dex + cls_off + c * 32 + 24);
         if (!cdata_off || cdata_off >= dex_sz) continue;
+
+        const char *cdesc = (c_type_idx < type_cnt) ? dex_get_str(dex, dex_sz, str_ids, str_cnt, type_ids[c_type_idx], NULL) : NULL;
+        if (cdesc && strstr(cdesc, "WritableFlags")) continue;
+        int cls_calls_dc = (cdesc && (strstr(cdesc, "Flags;") || strstr(cdesc, "FeatureFlag") ||
+                                      strstr(cdesc, "DeviceConfig") || strstr(cdesc, "Aconfig"))) ? 1 : 0;
+        int cls_is_setter = 0, cls_calls_getter = 0;
+
         const uint8_t *p = dex + cdata_off;
         uint32_t sf_cnt = read_uleb128(&p, dex_end);
         uint32_t if_cnt = read_uleb128(&p, dex_end);
         uint32_t dm_cnt = read_uleb128(&p, dex_end);
         uint32_t vm_cnt = read_uleb128(&p, dex_end);
+
+        const uint8_t *p_sfields = p;
         for (uint32_t i = 0; i < (sf_cnt + if_cnt) * 2 && p < dex_end; i++) read_uleb128(&p, dex_end);
 
         uint32_t total_m = dm_cnt + vm_cnt;
+        const uint8_t *p_methods = p;
+
+        // Быстрый предпросмотр класса: определяем cls_calls_dc, cls_calls_getter и cls_is_setter
+        uint32_t preview_m_id = 0;
         for (uint32_t m = 0; m < total_m && p < dex_end; m++) {
+            if (m == dm_cnt) preview_m_id = 0;
+            preview_m_id += read_uleb128(&p, dex_end);
             read_uleb128(&p, dex_end);
+            uint32_t code_off = read_uleb128(&p, dex_end);
+            if (preview_m_id < meth_cnt && str_on_prop_chg >= 0) {
+                const uint16_t *mid = (const uint16_t *)(dex + meth_off + preview_m_id * 8);
+                uint32_t n_idx = *(const uint32_t *)(mid + 2);
+                if (n_idx == (uint32_t)str_on_prop_chg) cls_calls_dc = 1;
+            }
+            if (!code_off || (uint64_t)code_off + 16 > dex_sz) continue;
+            uint32_t insns_sz = *(const uint32_t *)(dex + code_off + 12);
+            if (!insns_sz || (uint64_t)code_off + 16 + (uint64_t)insns_sz * 2 > dex_sz) continue;
+            const uint16_t *insns = (const uint16_t *)(dex + code_off + 16);
+            for (uint32_t pc = 0; pc < insns_sz; ) {
+                uint16_t inst = insns[pc];
+                uint8_t op = inst & 0xFF;
+                int w = dalvik_insn_width(insns, pc, insns_sz);
+                if (w <= 0 || pc + w > insns_sz) break;
+                if (((op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) && insns[pc + 1] < meth_cnt) {
+                    uint16_t midx = insns[pc + 1];
+                    uint8_t ma = meth_api[midx];
+                    if (ma >= DEX_API_DC_BOOL && ma <= DEX_API_DC_PROP1) { cls_calls_dc = 1; cls_calls_getter = 1; }
+                    else if (ma == DEX_API_SET) cls_is_setter = 1;
+                    else if (ma != 0) cls_calls_getter = 1;
+                }
+                pc += w;
+            }
+        }
+        if (cls_calls_getter) cls_is_setter = 0;
+
+        // Выгружаем инлайновые static final String константы класса из field_prop (static_values_off)
+        if (field_prop && !cls_is_setter && sf_cnt > 0) {
+            const uint8_t *sp = p_sfields;
+            uint32_t sf_idx = 0;
+            for (uint32_t i = 0; i < sf_cnt && sp < dex_end; i++) {
+                sf_idx += read_uleb128(&sp, dex_end);
+                read_uleb128(&sp, dex_end);
+                if (sf_idx < field_cnt && field_prop[sf_idx]) {
+                    const char *fs = field_prop[sf_idx];
+                    size_t flen = strlen(fs);
+                    if (is_dex_prop_cand(fs, flen) && (!strncmp(fs, "persist.", 8) || !strncmp(fs, "ro.", 3))) {
+                        fprintf(out, "__DEX_TOKEN__:%s=DYNAMIC_DEFAULT|%s\n", fs, jar_name);
+                    } else if (cls_calls_dc) {
+                        emit_dex_dc_token(out, fs, flen, jar_name);
+                    }
+                }
+            }
+        }
+
+        p = p_methods;
+        uint32_t m_id = 0;
+        for (uint32_t m = 0; m < total_m && p < dex_end; m++) {
+            if (m == dm_cnt) m_id = 0;
+            m_id += read_uleb128(&p, dex_end);
             read_uleb128(&p, dex_end);
             uint32_t code_off = read_uleb128(&p, dex_end);
             if (!code_off || (uint64_t)code_off + 16 > dex_sz) continue;
@@ -2313,31 +2787,47 @@ static void parse_dex_buffer(const uint8_t *dex, size_t dex_sz, const char *jar_
             const uint16_t *insns = (const uint16_t *)(dex + code_off + 16);
 
             // Предпроверка вызовов SystemProperties / perfGetProp + индексация статических строковых полей (sput-object)
-            int method_calls_prop = 0;
+            int method_calls_prop = 0, method_calls_setter = 0, method_calls_dc = cls_calls_dc, method_has_prop_str = 0;
+            if (m_id < meth_cnt && str_on_prop_chg >= 0) {
+                const uint16_t *mid = (const uint16_t *)(dex + meth_off + m_id * 8);
+                if (*(const uint32_t *)(mid + 2) == (uint32_t)str_on_prop_chg) method_calls_dc = 1;
+            }
+
             for (uint32_t pc = 0; pc < insns_sz; ) {
                 uint16_t inst = insns[pc];
                 uint8_t op = inst & 0xFF;
                 int w = dalvik_insn_width(insns, pc, insns_sz);
                 if (w <= 0 || pc + w > insns_sz) break;
-                if (field_prop && op == 0x1a && pc + 2 < insns_sz && (insns[pc + 2] & 0xFF) == 0x69 && (insns[pc + 2] >> 8) == (inst >> 8)) {
-                    uint16_t sidx = insns[pc + 1], fidx = insns[pc + 3];
-                    if (fidx < field_cnt) {
-                        size_t slen = 0;
-                        const char *s = dex_get_str(dex, dex_sz, str_ids, str_cnt, sidx, &slen);
-                        if (s && is_dex_prop_cand(s, slen)) field_prop[fidx] = s;
+                if (op == 0x1a || op == 0x1b) {
+                    uint32_t sidx = (op == 0x1a) ? insns[pc + 1] : ((uint32_t)insns[pc + 1] | ((uint32_t)insns[pc + 2] << 16));
+                    size_t slen = 0;
+                    const char *s = dex_get_str(dex, dex_sz, str_ids, str_cnt, sidx, &slen);
+                    if (s) {
+                        if (is_dex_prop_cand(s, slen)) method_has_prop_str = 1;
+                        if (field_prop && op == 0x1a && pc + 2 < insns_sz && (insns[pc + 2] & 0xFF) == 0x69 && (insns[pc + 2] >> 8) == (inst >> 8)) {
+                            uint16_t fidx = insns[pc + 3];
+                            if (fidx < field_cnt && is_dex_prop_cand(s, slen)) field_prop[fidx] = s;
+                        }
                     }
-                }
-                if (((op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) && insns[pc + 1] < meth_cnt && meth_api[insns[pc + 1]]) {
-                    method_calls_prop = 1;
+                } else if (op == 0x62 && field_prop && insns[pc + 1] < field_cnt && field_prop[insns[pc + 1]]) {
+                    method_has_prop_str = 1;
+                } else if (((op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) && insns[pc + 1] < meth_cnt) {
+                    uint16_t midx = insns[pc + 1];
+                    uint8_t ma = meth_api[midx];
+                    if (ma) {
+                        method_calls_prop = 1;
+                        if (ma == DEX_API_SET) method_calls_setter = 1;
+                        if (ma >= DEX_API_DC_BOOL && ma <= DEX_API_DC_PROP1) method_calls_dc = 1;
+                    }
                 }
                 pc += w;
             }
-            if (!method_calls_prop) continue;
+            if (!method_calls_prop && !method_calls_dc && !method_has_prop_str) continue;
 
             memset(has_int, 0, sizeof(has_int));
             memset(has_str, 0, sizeof(has_str));
             memset(is_cand, 0, sizeof(is_cand));
-            int watch = 0, count = 0;
+            const char *last_dc_ns = NULL;
 
             for (uint32_t pc = 0; pc < insns_sz; ) {
                 uint16_t inst = insns[pc];
@@ -2386,8 +2876,14 @@ static void parse_dex_buffer(const uint8_t *dex, size_t dex_sz, const char *jar_
                     const char *s = dex_get_str(dex, dex_sz, str_ids, str_cnt, sidx, &slen);
                     if (s) {
                         val_str[r] = s; has_str[r] = 1; has_int[r] = 0;
-                        if (is_dex_prop_cand(s, slen)) { is_cand[r] = 1; watch = 1; count = 0; }
-                        else is_cand[r] = 0;
+                        is_cand[r] = is_dex_prop_cand(s, slen) ? 1 : 0;
+                        if (!method_calls_setter) {
+                            if (is_cand[r] && (!strncmp(s, "persist.", 8) || !strncmp(s, "ro.", 3))) {
+                                fprintf(out, "__DEX_TOKEN__:%s=DYNAMIC_DEFAULT|%s\n", s, jar_name);
+                            } else if (method_calls_dc) {
+                                emit_dex_dc_token(out, s, slen, jar_name);
+                            }
+                        }
                     }
                 } else if (op == 0x69 && field_prop) { // sput-object vAA, field@BBBB
                     uint8_t r = inst >> 8;
@@ -2399,8 +2895,17 @@ static void parse_dex_buffer(const uint8_t *dex, size_t dex_sz, const char *jar_
                     uint8_t r = inst >> 8;
                     uint16_t fidx = insns[pc + 1];
                     if (fidx < field_cnt && field_prop[fidx]) {
-                        val_str[r] = field_prop[fidx]; has_str[r] = 1; has_int[r] = 0;
-                        is_cand[r] = 1; watch = 1; count = 0;
+                        const char *fs = field_prop[fidx];
+                        size_t flen = strlen(fs);
+                        val_str[r] = fs; has_str[r] = 1; has_int[r] = 0;
+                        is_cand[r] = is_dex_prop_cand(fs, flen) ? 1 : 0;
+                        if (!method_calls_setter) {
+                            if (is_cand[r] && (!strncmp(fs, "persist.", 8) || !strncmp(fs, "ro.", 3))) {
+                                fprintf(out, "__DEX_TOKEN__:%s=DYNAMIC_DEFAULT|%s\n", fs, jar_name);
+                            } else if (method_calls_dc) {
+                                emit_dex_dc_token(out, fs, flen, jar_name);
+                            }
+                        }
                     } else {
                         has_str[r] = 0; has_int[r] = 0; is_cand[r] = 0;
                     }
@@ -2412,59 +2917,133 @@ static void parse_dex_buffer(const uint8_t *dex, size_t dex_sz, const char *jar_
                     has_str[r] = 0; has_int[r] = 0; is_cand[r] = 0;
                 }
 
-                if (watch) {
-                    count++;
-                    if ((op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) {
-                        uint16_t midx = insns[pc + 1];
-                        uint8_t atype = (midx < meth_cnt) ? meth_api[midx] : 0;
-                        if (atype) {
-                            int n_args = 0; uint8_t args[5] = {0};
-                            if (op >= 0x6e && op <= 0x72) {
-                                n_args = (inst >> 12) & 0xF;
-                                uint16_t w2 = insns[pc + 2];
-                                args[0] = w2 & 0xF; args[1] = (w2 >> 4) & 0xF; args[2] = (w2 >> 8) & 0xF;
-                                args[3] = (w2 >> 12) & 0xF; args[4] = (inst >> 8) & 0xF;
+                if ((op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) {
+                    uint16_t midx = insns[pc + 1];
+                    int n_args = 0; uint8_t args[6] = {0};
+                    if (op >= 0x6e && op <= 0x72) {
+                        n_args = (inst >> 12) & 0xF;
+                        uint16_t w2 = insns[pc + 2];
+                        args[0] = w2 & 0xF; args[1] = (w2 >> 4) & 0xF; args[2] = (w2 >> 8) & 0xF;
+                        args[3] = (w2 >> 12) & 0xF; args[4] = (inst >> 8) & 0xF;
+                    } else {
+                        n_args = inst >> 8; if (n_args > 6) n_args = 6;
+                        uint16_t r0 = insns[pc + 2];
+                        for (int a = 0; a < n_args; a++) args[a] = (uint8_t)((r0 + a) & 0xFF);
+                    }
+
+                    uint8_t atype = (midx < meth_cnt) ? meth_api[midx] : 0;
+                    if (!atype && !method_calls_setter && n_args >= 1) {
+                        const char *cand_p = NULL;
+                        for (int a = 0; a < n_args; a++) {
+                            if (has_str[args[a]] && is_cand[args[a]]) { cand_p = val_str[args[a]]; break; }
+                        }
+                        if (cand_p) {
+                            atype = check_multidex_static_getter(dex, dex_sz, str_ids, str_cnt, type_ids, type_cnt,
+                                                                 proto_off, proto_cnt, meth_off, meth_cnt, midx, str_type_idx, cand_p);
+                        }
+                    }
+
+                    if (atype) {
+                        if (atype >= DEX_API_DC_BOOL && atype <= DEX_API_DC_PROP1) {
+                            int ns_pos = (op == 0x71 || op == 0x77) ? 0 : 1;
+                            if (atype != DEX_API_DC_PROP1 && n_args > ns_pos + 1 &&
+                                has_str[args[ns_pos]] && val_str[args[ns_pos]] &&
+                                has_str[args[ns_pos + 1]] && val_str[args[ns_pos + 1]]) {
+                                const char *ns = val_str[args[ns_pos]];
+                                const char *fl = val_str[args[ns_pos + 1]];
+                                if (is_dex_token_str(ns, strlen(ns)) && is_dex_token_str(fl, strlen(fl))) {
+                                    last_dc_ns = ns;
+                                    char dc_pname[256];
+                                    snprintf(dc_pname, sizeof(dc_pname), "persist.device_config.%s.%s", ns, fl);
+                                    if (atype == DEX_API_DC_BOOL) {
+                                        int is_t = (n_args > ns_pos + 2 && has_int[args[ns_pos + 2]] && val_int[args[ns_pos + 2]] == 1);
+                                        fprintf(out, "%s=%s|%s\n", dc_pname, is_t ? "DEFAULT_TRUE" : "DEFAULT_FALSE", jar_name);
+                                    } else if (atype == DEX_API_DC_INT || atype == DEX_API_DC_LONG) {
+                                        long long dv = (n_args > ns_pos + 2 && has_int[args[ns_pos + 2]]) ? (long long)val_int[args[ns_pos + 2]] : 0;
+                                        fprintf(out, "%s=DEFAULT_INT: %lld|%s\n", dc_pname, dv, jar_name);
+                                    } else {
+                                        if (n_args > ns_pos + 2 && has_str[args[ns_pos + 2]] && val_str[args[ns_pos + 2]]) {
+                                            fprintf(out, "%s=DEFAULT_STR: \"%s\"|%s\n", dc_pname, val_str[args[ns_pos + 2]], jar_name);
+                                        } else {
+                                            fprintf(out, "%s=DYNAMIC_DEFAULT|%s\n", dc_pname, jar_name);
+                                        }
+                                    }
+                                    emit_dex_dc_token(out, fl, strlen(fl), jar_name);
+                                }
                             } else {
-                                n_args = inst >> 8; if (n_args > 5) n_args = 5;
-                                uint16_t r0 = insns[pc + 2];
-                                for (int a = 0; a < n_args; a++) args[a] = (uint8_t)((r0 + a) & 0xFF);
+                                for (int a = 0; a < n_args; a++) {
+                                    if (has_str[args[a]] && val_str[args[a]]) {
+                                        const char *fl = val_str[args[a]];
+                                        size_t fl_len = strlen(fl);
+                                        if (is_dex_token_str(fl, fl_len)) {
+                                            if (a == ns_pos && atype != DEX_API_DC_PROP1) {
+                                                last_dc_ns = fl;
+                                            }
+                                            if (fl_len >= 10 && (strchr(fl, '_') || strchr(fl, '-') || strchr(fl, '.'))) {
+                                                if (last_dc_ns && strcmp(last_dc_ns, fl) != 0) {
+                                                    char dc_pname[256];
+                                                    snprintf(dc_pname, sizeof(dc_pname), "persist.device_config.%s.%s", last_dc_ns, fl);
+                                                    if (atype == DEX_API_DC_BOOL) {
+                                                        int is_t = (n_args > a + 1 && has_int[args[a + 1]] && val_int[args[a + 1]] == 1);
+                                                        fprintf(out, "%s=%s|%s\n", dc_pname, is_t ? "DEFAULT_TRUE" : "DEFAULT_FALSE", jar_name);
+                                                    } else if (atype == DEX_API_DC_INT || atype == DEX_API_DC_LONG) {
+                                                        long long dv = (n_args > a + 1 && has_int[args[a + 1]]) ? (long long)val_int[args[a + 1]] : 0;
+                                                        fprintf(out, "%s=DEFAULT_INT: %lld|%s\n", dc_pname, dv, jar_name);
+                                                    } else {
+                                                        if (n_args > a + 1 && has_str[args[a + 1]] && val_str[args[a + 1]]) {
+                                                            fprintf(out, "%s=DEFAULT_STR: \"%s\"|%s\n", dc_pname, val_str[args[a + 1]], jar_name);
+                                                        } else {
+                                                            fprintf(out, "%s=DYNAMIC_DEFAULT|%s\n", dc_pname, jar_name);
+                                                        }
+                                                    }
+                                                }
+                                                emit_dex_dc_token(out, fl, fl_len, jar_name);
+                                            }
+                                        }
+                                    }
+                                }
                             }
+                        } else {
                             int k_pos = (atype == DEX_API_PERF && n_args >= 2) ? 1 : 0;
+                            if (!has_str[args[k_pos]] || !is_cand[args[k_pos]]) {
+                                for (int a = 0; a < n_args; a++) {
+                                    if (has_str[args[a]] && is_cand[args[a]]) { k_pos = a; break; }
+                                }
+                            }
                             if (n_args > k_pos) {
                                 uint8_t kreg = args[k_pos];
                                 if (has_str[kreg] && is_cand[kreg] && val_str[kreg]) {
                                     const char *pname = val_str[kreg];
+                                    int d_pos = k_pos + 1;
                                     if (atype == DEX_API_SET) {
                                         fprintf(out, "%s=DYNAMIC_SETTER|%s\n", pname, jar_name);
                                     } else if (atype == DEX_API_BOOL) {
-                                        int is_t = (n_args >= 2 && has_int[args[1]] && val_int[args[1]] == 1);
+                                        int is_t = (n_args > d_pos && has_int[args[d_pos]] && val_int[args[d_pos]] == 1);
                                         fprintf(out, "%s=%s|%s\n", pname, is_t ? "DEFAULT_TRUE" : "DEFAULT_FALSE", jar_name);
                                     } else if (atype == DEX_API_INT || atype == DEX_API_LONG) {
-                                        long long dv = (n_args >= 2 && has_int[args[1]]) ? (long long)val_int[args[1]] : 0;
+                                        long long dv = (n_args > d_pos && has_int[args[d_pos]]) ? (long long)val_int[args[d_pos]] : 0;
                                         fprintf(out, "%s=DEFAULT_INT: %lld|%s\n", pname, dv, jar_name);
                                     } else if (atype == DEX_API_PERF) {
-                                        int d_pos = (n_args >= 3) ? 2 : 1;
-                                        if (n_args > d_pos && has_str[args[d_pos]] && val_str[args[d_pos]]) {
-                                            const char *ds = val_str[args[d_pos]];
+                                        int perf_d = (n_args >= 3) ? 2 : 1;
+                                        if (n_args > perf_d && has_str[args[perf_d]] && val_str[args[perf_d]]) {
+                                            const char *ds = val_str[args[perf_d]];
                                             if (!strcmp(ds, "false")) fprintf(out, "%s=DEFAULT_FALSE|%s\n", pname, jar_name);
                                             else if (!strcmp(ds, "true")) fprintf(out, "%s=DEFAULT_TRUE|%s\n", pname, jar_name);
                                             else fprintf(out, "%s=DEFAULT_STR: \"%s\"|%s\n", pname, ds, jar_name);
-                                        } else fprintf(out, "%s=NO_DEFAULT|%s\n", pname, jar_name);
-                                    } else if (atype == DEX_API_STR2 && n_args >= 2) {
-                                        uint8_t dreg = args[1];
+                                        } else fprintf(out, "%s=DYNAMIC_DEFAULT|%s\n", pname, jar_name);
+                                    } else if (atype == DEX_API_STR2 && n_args > d_pos) {
+                                        uint8_t dreg = args[d_pos];
                                         if (has_str[dreg] && val_str[dreg]) fprintf(out, "%s=DEFAULT_STR: \"%s\"|%s\n", pname, val_str[dreg], jar_name);
                                         else fprintf(out, "%s=DYNAMIC_DEFAULT|%s\n", pname, jar_name);
                                     } else if (atype == DEX_API_STR1) {
                                         fprintf(out, "%s=DEFAULT_STR: \"\"|%s\n", pname, jar_name);
                                     } else {
-                                        fprintf(out, "%s=NO_DEFAULT|%s\n", pname, jar_name);
+                                        fprintf(out, "%s=DYNAMIC_DEFAULT|%s\n", pname, jar_name);
                                     }
                                 }
                             }
-                            watch = 0;
                         }
                     }
-                    if (count > 25) watch = 0;
                 }
                 pc += w;
             }
@@ -2509,6 +3088,10 @@ static void *dex_worker(void *arg) {
             }
         }
         if (decomp) free(decomp);
+        if (t->map_ref && __sync_sub_and_fetch(t->map_ref, 1) == 0) {
+            munmap((void *)t->zip_data, t->zip_size);
+            free(t->map_ref);
+        }
     }
     return NULL;
 }
@@ -2520,27 +3103,123 @@ static inline uint32_t r32(const void *p) {
     uint32_t v; memcpy(&v, p, 4); return v;
 }
 
+// Поиск несжатых секций dex\n03x\0 внутри .vdex контейнера (zero-copy без zlib)
+static int queue_vdex_sections(const uint8_t *vdata, size_t vsz, const char *jname, size_t *tcap) {
+    if (vsz < 128 || memcmp(vdata, "vdex", 4) != 0) return 0;
+    int added = 0;
+    int *ref = malloc(sizeof(int));
+    if (!ref) return 0;
+    *ref = 0;
+
+    for (size_t off = 16; off + 112 <= vsz; off += 4) {
+        if (vdata[off] == 'd' && vdata[off + 1] == 'e' && vdata[off + 2] == 'x' && vdata[off + 3] == '\n' &&
+            vdata[off + 4] == '0' && vdata[off + 7] == '\0') {
+            uint32_t d_sz = r32(vdata + off + 32);
+            uint32_t h_sz = r32(vdata + off + 36);
+            if (h_sz == 112 && d_sz >= 112 && (uint64_t)off + d_sz <= vsz) {
+                if ((size_t)g_dex_task_cnt >= *tcap) {
+                    *tcap *= 2;
+                    g_dex_tasks = realloc(g_dex_tasks, (*tcap) * sizeof(DexTask));
+                }
+                (*ref)++;
+                g_dex_tasks[g_dex_task_cnt++] = (DexTask){vdata, vsz, (uint32_t)off, d_sz, d_sz, 0, jname, NULL, ref};
+                added++;
+                off += ((d_sz + 3) & ~3u) - 4;
+            }
+        }
+    }
+    if (added == 0) free(ref);
+    return added;
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && (!strcmp(argv[1], "-v") || !strcmp(argv[1], "--version"))) {
         printf("overridify-scan %s\n", SCANNER_VERSION); return 0;
     }
     if (argc >= 3 && !strcmp(argv[1], "--dex")) {
+        memset(g_seen_ino, 0, sizeof(g_seen_ino));
         size_t tcap = 128;
         g_dex_tasks = calloc(tcap, sizeof(DexTask));
         for (int a = 2; a < argc; a++) {
             const char *path = argv[a];
             int fd = open(path, O_RDONLY); if (fd < 0) continue;
             struct stat st;
-            if (fstat(fd, &st) < 0 || st.st_size < 112) { close(fd); continue; }
+            if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size < 22) { close(fd); continue; }
+            uint64_t ino_key = ((uint64_t)st.st_dev << 32) ^ (uint64_t)st.st_ino;
+            if (ino_key) {
+                uint32_t ih = (uint32_t)(ino_key ^ (ino_key >> 17)) & 16383;
+                int dup = 0;
+                for (int probe = 0; probe < 16384; probe++) {
+                    if (g_seen_ino[ih] == ino_key) { dup = 1; break; }
+                    if (g_seen_ino[ih] == 0) { g_seen_ino[ih] = ino_key; break; }
+                    ih = (ih + 1) & 16383;
+                }
+                if (dup) { close(fd); continue; }
+            }
+            const char *jname = strrchr(path, '/'); jname = jname ? jname + 1 : path;
+            if (!strcmp(jname, "base.apk") && jname > path) {
+                const char *s2 = jname - 1;
+                while (s2 > path && *(s2 - 1) != '/') s2--;
+                size_t dlen = (size_t)(jname - 1 - s2);
+                const char *dash = memchr(s2, '-', dlen);
+                if (dash && (size_t)(dash - s2) < 250) {
+                    size_t plen = (size_t)(dash - s2);
+                    char *dj = malloc(plen + 5);
+                    if (dj) {
+                        snprintf(dj, plen + 5, "%.*s.apk", (int)plen, s2);
+                        jname = dj;
+                    }
+                }
+            }
+
+            // Fast-path: проверяем парный oat/arm64/<stem>.vdex (zero-copy без декомпрессии + поддержка stripped/odex APK)
+            const char *raw_name = strrchr(path, '/');
+            raw_name = raw_name ? raw_name + 1 : path;
+            const char *ext = strrchr(raw_name, '.');
+            if (ext && (!strcmp(ext, ".apk") || !strcmp(ext, ".jar")) && raw_name > path) {
+                char vdex_path[1024];
+                size_t dir_len = (size_t)(raw_name - path);
+                size_t stem_len = (size_t)(ext - raw_name);
+                if (dir_len + stem_len + 20 < sizeof(vdex_path)) {
+                    snprintf(vdex_path, sizeof(vdex_path), "%.*soat/arm64/%.*s.vdex",
+                             (int)dir_len, path, (int)stem_len, raw_name);
+                    int vfd = open(vdex_path, O_RDONLY);
+                    if (vfd >= 0) {
+                        struct stat vst;
+                        if (fstat(vfd, &vst) == 0 && S_ISREG(vst.st_mode) && vst.st_size >= 128) {
+                            size_t vsz = (size_t)vst.st_size;
+                            const uint8_t *vdata = mmap(NULL, vsz, PROT_READ, MAP_SHARED, vfd, 0);
+                            close(vfd);
+                            if (vdata != MAP_FAILED) {
+                                if (queue_vdex_sections(vdata, vsz, jname, &tcap) > 0) {
+                                    close(fd);
+                                    continue;
+                                }
+                                munmap((void *)vdata, vsz);
+                            }
+                        } else {
+                            close(vfd);
+                        }
+                    }
+                }
+            }
+
+            if (st.st_size < 112) { close(fd); continue; }
             size_t sz = (size_t)st.st_size;
             const uint8_t *data = mmap(NULL, sz, PROT_READ, MAP_SHARED, fd, 0);
             close(fd);
             if (data == MAP_FAILED) continue;
-            const char *jname = strrchr(path, '/'); jname = jname ? jname + 1 : path;
 
             if (!memcmp(data, "dex\n", 4)) {
+                int *ref = malloc(sizeof(int));
+                if (!ref) { munmap((void *)data, sz); continue; }
+                *ref = 1;
                 if ((size_t)g_dex_task_cnt >= tcap) { tcap *= 2; g_dex_tasks = realloc(g_dex_tasks, tcap * sizeof(DexTask)); }
-                g_dex_tasks[g_dex_task_cnt++] = (DexTask){data, sz, 0, (uint32_t)sz, (uint32_t)sz, 0, jname, NULL};
+                g_dex_tasks[g_dex_task_cnt++] = (DexTask){data, sz, 0, (uint32_t)sz, (uint32_t)sz, 0, jname, NULL, ref};
+                continue;
+            }
+            if (!memcmp(data, "vdex", 4)) {
+                if (queue_vdex_sections(data, sz, jname, &tcap) == 0) munmap((void *)data, sz);
                 continue;
             }
             // Поиск End of Central Directory (PK\x05\x06) в конце ZIP (.jar / .apk)
@@ -2556,6 +3235,9 @@ int main(int argc, char **argv) {
             if ((uint64_t)cd_off >= sz) { munmap((void*)data, sz); continue; }
             const uint8_t *cd = data + cd_off, *end = data + sz;
             int before_cnt = g_dex_task_cnt;
+            int *ref = malloc(sizeof(int));
+            if (!ref) { munmap((void*)data, sz); continue; }
+            *ref = 0;
 
             for (uint16_t e = 0; e < cd_cnt && cd + 46 <= end; e++) {
                 if (cd[0] != 'P' || cd[1] != 'K' || cd[2] != 1 || cd[3] != 2) break;
@@ -2576,13 +3258,17 @@ int main(int argc, char **argv) {
                         uint32_t data_off = lhdr_off + 30 + l_fn + l_ex;
                         if ((uint64_t)data_off + c_sz <= sz) {
                             if ((size_t)g_dex_task_cnt >= tcap) { tcap *= 2; g_dex_tasks = realloc(g_dex_tasks, tcap * sizeof(DexTask)); }
-                            g_dex_tasks[g_dex_task_cnt++] = (DexTask){data, sz, data_off, c_sz, u_sz, meth, jname, NULL};
+                            (*ref)++;
+                            g_dex_tasks[g_dex_task_cnt++] = (DexTask){data, sz, data_off, c_sz, u_sz, meth, jname, NULL, ref};
                         }
                     }
                 }
                 cd += 46 + fn_len + ex_len + cm_len;
             }
-            if (g_dex_task_cnt == before_cnt) munmap((void*)data, sz);
+            if (g_dex_task_cnt == before_cnt) {
+                free(ref);
+                munmap((void*)data, sz);
+            }
         }
         if (g_dex_task_cnt > 0) {
             pthread_t th[NUM_THREADS]; int nt = g_dex_task_cnt < NUM_THREADS ? g_dex_task_cnt : NUM_THREADS;
