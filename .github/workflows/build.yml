@@ -7,6 +7,7 @@ on:
       - '**.md'
       - 'LICENSE'
       - '.gitignore'
+      - 'update.json'
     tags: ['v*']
   pull_request:
     branches: [main]
@@ -14,6 +15,7 @@ on:
       - '**.md'
       - 'LICENSE'
       - '.gitignore'
+      - 'update.json'
   workflow_dispatch:
 
 permissions:
@@ -29,6 +31,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Locate or install Android NDK
         run: |
@@ -110,4 +114,31 @@ jobs:
             gh release create "${TAG}" "${ZIP_NAME}" \
               --title "Overridify ${TAG}" \
               --notes-from-tag
+          fi
+
+      - name: Update update.json for Root Managers
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION=$(grep '^version=' module.prop | cut -d= -f2)
+          VERSION_CODE=$(grep '^versionCode=' module.prop | cut -d= -f2)
+          ZIP_NAME="Overridify-${VERSION}.zip"
+
+          git checkout -B main origin/main
+
+          cat <<EOF > update.json
+          {
+            "version": "${VERSION}",
+            "versionCode": ${VERSION_CODE},
+            "zipUrl": "https://github.com/pohorg43/Overridify/releases/download/${TAG}/${ZIP_NAME}",
+            "changelog": "https://raw.githubusercontent.com/pohorg43/Overridify/main/CHANGELOG.md"
+          }
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add update.json
+          if ! git diff --staged --quiet; then
+            git commit -m "chore(release): update update.json to ${VERSION} [skip ci]"
+            git push origin main
           fi
