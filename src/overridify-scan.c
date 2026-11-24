@@ -768,7 +768,6 @@ static int is_candidate_prop_syntax(const char *s, size_t len) {
     // Чистая грамматика Bionic AOSP: длина 3..91, первый символ латинский, последний - буквенно-цифровой
     if (len < 3 || len > 91 || s[0] < 'a' || s[0] > 'z') return 0;
     if (!isalnum((unsigned char)s[len - 1])) return 0;
-    if (!strncmp(s, "init.svc", 8) || !strncmp(s, "ro.boottime", 11)) return 0;
     if (len >= 3 && !strcmp(s + len - 3, ".so")) return 0;
 
 
@@ -2454,7 +2453,7 @@ static void parse_dex_buffer(const uint8_t *dex, size_t dex_sz, const char *jar_
             size_t slen = 0;
             const char *s = dex_get_str(dex, dex_sz, str_ids, str_cnt, i, &slen);
             if (!s || slen < 6 || slen > 91) continue;
-            if ((!strncmp(s, "ro.", 3) || !strncmp(s, "persist.", 8)) && is_dex_prop_cand(s, slen)) {
+            if (is_dex_prop_cand(s, slen)) {
                 fprintf(out, "__DEX_TOKEN__:%s=DYNAMIC_DEFAULT|%s\n", s, jar_name);
             } else if (is_lowercase_flag_token(s, slen)) {
                 emit_dex_dc_token(out, s, slen, jar_name);
@@ -2491,13 +2490,7 @@ static void parse_dex_buffer(const uint8_t *dex, size_t dex_sz, const char *jar_
         }
     }
 
-    int has_prop_strs = dex_has_prefix_bsearch(dex, dex_sz, str_ids, str_cnt, "persist.", 8) ||
-                        dex_has_prefix_bsearch(dex, dex_sz, str_ids, str_cnt, "ro.", 3) ||
-                        dex_has_prefix_bsearch(dex, dex_sz, str_ids, str_cnt, "sys.", 4) ||
-                        dex_has_prefix_bsearch(dex, dex_sz, str_ids, str_cnt, "debug.", 6) ||
-                        dex_has_prefix_bsearch(dex, dex_sz, str_ids, str_cnt, "vendor.", 7);
-
-    if (!has_any_prop_class && str_perf < 0 && str_sysprop_dot < 0 && !has_prop_strs) {
+    if (!has_any_prop_class && str_perf < 0 && str_sysprop_dot < 0) {
         free(is_prop_type);
         return;
     }
@@ -2688,7 +2681,7 @@ static void parse_dex_buffer(const uint8_t *dex, size_t dex_sz, const char *jar_
         if (!added_wrappers) break;
     }
 
-    if (!has_any_api && str_sysprop_dot < 0 && !has_prop_strs) {
+    if (!has_any_api && str_sysprop_dot < 0) {
         if (field_prop) free(field_prop);
         free(meth_api);
         return;
@@ -2764,7 +2757,7 @@ static void parse_dex_buffer(const uint8_t *dex, size_t dex_sz, const char *jar_
                 if (sf_idx < field_cnt && field_prop[sf_idx]) {
                     const char *fs = field_prop[sf_idx];
                     size_t flen = strlen(fs);
-                    if (is_dex_prop_cand(fs, flen) && (!strncmp(fs, "persist.", 8) || !strncmp(fs, "ro.", 3))) {
+                    if (is_dex_prop_cand(fs, flen)) {
                         fprintf(out, "__DEX_TOKEN__:%s=DYNAMIC_DEFAULT|%s\n", fs, jar_name);
                     } else if (cls_calls_dc) {
                         emit_dex_dc_token(out, fs, flen, jar_name);
@@ -2878,7 +2871,7 @@ static void parse_dex_buffer(const uint8_t *dex, size_t dex_sz, const char *jar_
                         val_str[r] = s; has_str[r] = 1; has_int[r] = 0;
                         is_cand[r] = is_dex_prop_cand(s, slen) ? 1 : 0;
                         if (!method_calls_setter) {
-                            if (is_cand[r] && (!strncmp(s, "persist.", 8) || !strncmp(s, "ro.", 3))) {
+                            if (is_cand[r]) {
                                 fprintf(out, "__DEX_TOKEN__:%s=DYNAMIC_DEFAULT|%s\n", s, jar_name);
                             } else if (method_calls_dc) {
                                 emit_dex_dc_token(out, s, slen, jar_name);
@@ -2900,7 +2893,7 @@ static void parse_dex_buffer(const uint8_t *dex, size_t dex_sz, const char *jar_
                         val_str[r] = fs; has_str[r] = 1; has_int[r] = 0;
                         is_cand[r] = is_dex_prop_cand(fs, flen) ? 1 : 0;
                         if (!method_calls_setter) {
-                            if (is_cand[r] && (!strncmp(fs, "persist.", 8) || !strncmp(fs, "ro.", 3))) {
+                            if (is_cand[r]) {
                                 fprintf(out, "__DEX_TOKEN__:%s=DYNAMIC_DEFAULT|%s\n", fs, jar_name);
                             } else if (method_calls_dc) {
                                 emit_dex_dc_token(out, fs, flen, jar_name);

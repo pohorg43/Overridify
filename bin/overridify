@@ -234,7 +234,7 @@ ensure_elf_cache() {
     local elf_sig_f="$OVER_TMP_DIR/elf_scan.sig"
     local scan_sig=$(stat -c '%Y:%s' "$SCAN" 2>/dev/null)
     local targets_sig=$(stat -c '%Y:%s' "$MODDIR/common/database/audit_targets.sh" 2>/dev/null)
-    local mod_ver="v1.7"
+    local mod_ver="v1.8"
     [ -f "$MODDIR/module.prop" ] && mod_ver=$(grep -m 1 '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
     local mods_hash=$(cat "$OVER_TMP_DIR/mods.sig" 2>/dev/null | md5sum 2>/dev/null | awk '{print $1}')
     [ -z "$mods_hash" ] && mods_hash=$(cat "$OVER_TMP_DIR/mods.sig" 2>/dev/null | tr '\n' '_')
@@ -314,7 +314,7 @@ init_cache() {
     # Уровень 3 (RAM): Всегда актуальный снимок live getprop (выполняется синхронно за ~30-40 мс)
     getprop | tr -d '[]' | $AWK_BIN -F': ' '{print $1 "=" $2}' > "$CACHE_LIVE_PROPS" 2>/dev/null
 
-    local mod_ver="v1.7"
+    local mod_ver="v1.8"
     [ -f "$MODDIR/module.prop" ] && mod_ver=$(grep -m 1 '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
     local scan_sig="$(stat -c '%Y:%s' "$SCAN" "$0" 2>/dev/null | tr '\n' '_')"
     local boot_sig="${GLOBAL_BOOT_TIME}_$(getprop ro.build.fingerprint)_${mod_ver}_${scan_sig}"
@@ -750,9 +750,9 @@ init_default_en() {
     TXT_SUB_HWUI="HWUI 2D Engine"; TXT_SUB_SF="SurfaceFlinger & RenderEngine"; TXT_SUB_DISP="Display HAL (Composer & Gralloc)"
     TXT_SUB_AUDIO="Audio Pipeline (Core, HAL & DSP)"; TXT_SUB_DOLBY="Dolby Atmos Engine"; TXT_SUB_BT="Bluetooth & LE Audio"
     TXT_SUB_INPUT="Input & Frame Pacing"; TXT_SUB_OEM="OEM Extensions"; TXT_SUB_ALL="Full System Audit (All Files)"
-    TXT_OEM_TITLE="OEM EXTENSIONS"; TXT_OEM_AUDIO="OEM Audio Pipeline"; TXT_OEM_DISP="OEM Display & Touch"; TXT_OEM_PERF="OEM Performance & Gaming"; TXT_OEM_HAPTIC="OEM Haptics & Vibration"; TXT_OEM_CAM="OEM Camera & Media"; TXT_OEM_SYS="OEM System, Power & Framework"; TXT_OEM_PROMPT="Choice > "
-    TXT_AUDIT_NOT_FOUND="[-] No properties discovered in target binaries."; TXT_AUDIT_TOTAL="Total verified properties:"
-    TXT_ITEM_VALUE="Value  "; TXT_ITEM_SOURCE="Source "; TXT_ITEM_MACHINE="Scanner"; TXT_FILE_UNKNOWN="File unknown"
+    TXT_OEM_TITLE="OEM EXTENSIONS"; TXT_OEM_AUDIO="OEM Audio Pipeline"; TXT_OEM_DISP="OEM Display & Touch"; TXT_OEM_PERF="OEM Performance & Gaming"; TXT_OEM_HAPTIC="OEM Haptics & Vibration"; TXT_OEM_CAM="OEM Camera & Media"; TXT_OEM_SYS="OEM System, Power & Framework"; TXT_OEM_PROMPT="Choice > "; TXT_OEM_NONE="No OEM extension files detected on this device."
+    TXT_AUDIT_NOT_FOUND="[-] No properties discovered in target binaries."; TXT_AUDIT_TOTAL="Total properties:"
+    TXT_ITEM_VALUE="Value  "; TXT_ITEM_SOURCE="Source "; TXT_ITEM_MACHINE="Scanner"; TXT_FILE_UNKNOWN="File unknown"; TXT_FILE_INDICATORS="Service Indicators"
     TXT_BACKPORT="backport"; TXT_JUNK_LABEL="junk"
     TXT_RADAR_TITLE="JUNK RADAR"; TXT_RADAR_SCANNING="[*] Scanning system context..."; TXT_RADAR_STATUS="Status  "
     TXT_RADAR_CLEAN="Wipe persist ghosts from /data/property"; TXT_RADAR_CLEANING="[*] Removing via resetprop -p --delete..."
@@ -878,7 +878,9 @@ init_default_en() {
     TXT_CONFLICT_PROCEED="Apply override anyway? [Y/n] "
     TXT_SEARCH_TITLE="KEYWORD PROPERTY SEARCH"; TXT_SEARCH_PROMPT="Enter query (e.g.: renderer, backpressure) > "; TXT_SEARCH_DONE="Search complete."
     TXT_SEARCH_FOUND="Found:"; TXT_SEARCH_ERR_EMPTY="specify search query. Example: overridify search skia"
-    TXT_EXPORT_TITLE="FULL AUDIT REPORT EXPORT"; TXT_EXPORT_WRITING="[*] Writing to"; TXT_EXPORT_SUCCESS="[+] Report saved:"; TXT_EXPORT_FAIL="[-] Failed to write report to /sdcard."
+    TXT_EXPORT_TITLE="FULL AUDIT REPORT EXPORT"; TXT_EXPORT_SUBSYSTEM_TITLE="SUBSYSTEM AUDIT REPORT EXPORT"
+    TXT_EXPORT_BTN="Export report to file"; TXT_EXPORT_PATH_PROMPT="Output path"
+    TXT_EXPORT_WRITING="[*] Writing to"; TXT_EXPORT_SUCCESS="[+] Report saved:"; TXT_EXPORT_FAIL="[-] Failed to write report to /sdcard."
     TXT_TIME="time"; TXT_SEC="s"
     TXT_ERR="Error:"; TXT_UNKNOWN_CMD="Unknown command:"; TXT_USE_HELP="Use: overridify help"
     TXT_TERMUX_SHORTCUT="Termux shortcut 'overridify' created"
@@ -887,11 +889,11 @@ init_default_en() {
         echo -e " ${C_BOLD}Usage:${C_RESET} overridify [command] [options]\n"
         echo -e " ${C_GREEN}Commands:${C_RESET}"
         echo -e "   ${C_YELLOW}(no arguments)${C_RESET}                    Launch interactive TUI interface"
-        echo -e "   ${C_YELLOW}audit [subsystem|full]${C_RESET}            Audit subsystem or full system audit"
+        echo -e "   ${C_YELLOW}audit [subsystem|full] [-o [path]]${C_RESET} Audit subsystem (terminal or file export)"
         echo -e "   ${C_YELLOW}preset [id|all|reset|status|conflicts]${C_RESET} Manage rendering presets (vulkan, smooth, touch, gaming)"
         echo -e "   ${C_YELLOW}radar [--clean]${C_RESET}                   Scan system for junk properties"
         echo -e "   ${C_YELLOW}search <query>${C_RESET}                    Search properties in target binaries"
-        echo -e "   ${C_YELLOW}export [path]${C_RESET}                     Export full audit report (default: /sdcard/...)"
+        echo -e "   ${C_YELLOW}export [subsystem|all] [path]${C_RESET}     Export subsystem or full report (default: /sdcard/...)"
         echo -e "   ${C_YELLOW}help, -h, --help${C_RESET}                  Show this help message\n"
     }
 }
@@ -904,13 +906,19 @@ load_language() {
         local loc="$LANG $LC_ALL $LC_MESSAGES $(getprop persist.sys.locale) $(getprop persist.sys.locales) $(settings get system system_locales 2>/dev/null) $(getprop ro.product.locale)"
         case "$loc" in
             *[rR][uU]*|*[bB][yY]*|*[kK][zZ]*|*[uU][aA]*|*[uU][kK]*) CUR_L="ru" ;;
-            *) CUR_L="en" ;;
+            *[iI][dD]*|*[iI][nN]*)                                  CUR_L="id" ;;
+            *[iI][tT]*)                                             CUR_L="it" ;;
+            *[eE][sS]*)                                             CUR_L="es" ;;
+            *[pP][tT]*)                                             CUR_L="pt" ;;
+            *[tT][rR]*)                                             CUR_L="tr" ;;
+            *[hH][iI]*)                                             CUR_L="hi" ;;
+            *)                                                      CUR_L="en" ;;
         esac
     fi
-    if [ "$CUR_L" = "ru" ]; then
+    if [ "$CUR_L" != "en" ] && [ -n "$CUR_L" ]; then
         for d in "$MODDIR" /data/data/com.termux/files/home/overridify /data/adb/modules/overridify; do
-            if [ -f "$d/common/languages/ru.sh" ]; then
-                . "$d/common/languages/ru.sh"
+            if [ -f "$d/common/languages/${CUR_L}.sh" ]; then
+                . "$d/common/languages/${CUR_L}.sh"
                 break
             fi
         done
@@ -1027,7 +1035,7 @@ is_junk_prop() {
     local sr="$3"
     [ -z "$cv" ] && return 1
     case "$p" in init.svc*|ro.boottime*) return 1 ;; esac
-    case "$sr" in DEFAULT_*|HARDCODED_*|DYNAMIC_*|NO_DEFAULT|TABLE_*) return 1 ;; esac
+    case "$sr" in DEFAULT_*|HARDCODED_*|DYNAMIC_*|NO_DEFAULT|TABLE_*|SYSTEM_INDICATOR) return 1 ;; esac
 
     init_device_flags
     local meta=""
@@ -1157,7 +1165,18 @@ render_audit_item() {
         local j_def=$(get_dex_default "$p")
         if [ -n "$j_def" ] && [ "$j_def" != "UNKNOWN" ]; then sr="$j_def"; else sr="NO_DEFAULT"; fi
     elif [ -z "$sr" ] || [ "$sr" = "---" ] || [ "$sr" = "NOT_A_PROPERTY" ]; then
-        if [ -n "$cur" ]; then sr="DYNAMIC_DEFAULT"; else sr="---"; fi
+        if [ -n "$cur" ]; then
+            case "$p" in
+                dev.mnt.*|init.svc_debug_pid.*|init.svc.*|ro.boottime.*|cache_key.*|ro.boot.*|ro.bootimage.*|partition.*)
+                    sr="SYSTEM_INDICATOR"
+                    ;;
+                *)
+                    return 1
+                    ;;
+            esac
+        else
+            sr="---"
+        fi
     elif [ "$sr" = "DYNAMIC_DEFAULT" ]; then
         local j_def=$(get_dex_default "$p")
         case "$j_def" in
@@ -1293,7 +1312,7 @@ build_audit_comb() {
     ) | LC_ALL=C $AWK_BIN -v pat="$pat" -v cid="$cat_id" '
         cid ~ /^OEMCamera/ && /^persist\.logd\./ { next }
         cid ~ /^OEMSystem/ && /\.(audio|display|touch|bt|camera|video|haptic|gameopt|osense|oiface)\./ { next }
-        $0 ~ pat && !/^(init\.svc|ro\.boottime)/ && /^[a-z][a-z0-9_-]*(\.[a-zA-Z0-9_-]*[a-zA-Z0-9])+$/ {
+        $0 ~ pat && /^[a-z][a-z0-9_-]*(\.[a-zA-Z0-9_-]*[a-zA-Z0-9])+$/ {
             if (!seen[$0]++) print $0 "|NOT_FOUND_IN_BINARY|"
         }' >> "$sc" 2>/dev/null
 
@@ -1337,7 +1356,8 @@ build_audit_comb() {
              -v is_xiaomi="$IS_XIAOMI" -v is_nubia="$IS_NUBIA" -v is_pal="$IS_PAL" -v has_rot="$HAS_ROT" \
              -v has_dirac="$HAS_DIRAC" -v has_waves="$HAS_WAVES" -v has_holo="$HAS_HOLO" \
              -v has_oreality="$HAS_OREALITY" -v has_ozo="$HAS_OZO" -v has_dts="$HAS_DTS" \
-             -v use_vk="$(getprop ro.hwui.use_vulkan)" '
+             -v use_vk="$(getprop ro.hwui.use_vulkan)" \
+             -v lbl_ind="${TXT_FILE_INDICATORS:-Service Indicators}" '
     BEGIN {
         while ((getline l < live_f) > 0) {
             eq = index(l, "=");
@@ -1385,7 +1405,20 @@ build_audit_comb() {
             close(prop_f);
         }
         if (mod_f != "") { while ((getline l < mod_f) > 0) { split(l, a, "|"); if (a[1] != "") mod[a[1]] = a[2]; } close(mod_f); }
-        if (bp_f != "") { while ((getline l < bp_f) > 0) { split(l, a, "|"); if (a[1] != "") bp[a[1]] = a[2]; } close(bp_f); }
+        if (bp_f != "") {
+            while ((getline l < bp_f) > 0) {
+                split(l, a, "|");
+                if (a[1] != "") {
+                    bp[a[1]] = a[2];
+                    eq = index(a[1], "=");
+                    if (eq > 0) {
+                        pk = substr(a[1], 1, eq - 1);
+                        if (!(pk in bp_prop)) bp_prop[pk] = a[2];
+                    }
+                }
+            }
+            close(bp_f);
+        }
         if (per_f != "") { while ((getline l < per_f) > 0) { if (l != "") persist_p[l] = 1; } close(per_f); }
         if (rc_f != "") {
             while ((getline l < rc_f) > 0) {
@@ -1394,7 +1427,10 @@ build_audit_comb() {
                     f = substr(l, 1, c1 - 1); sub(/.*\//, "", f); rest = substr(l, c1 + 1); sub(/^[0-9]+:[[:space:]]*/, "", rest);
                     if (match(rest, /^setprop[[:space:]]+[^[:space:]]+[[:space:]]+.*/)) {
                         split(rest, parts, /[[:space:]]+/);
-                        if (parts[2] != "" && parts[3] != "") rc[parts[2] "=" parts[3]] = "service (" f ")";
+                        if (parts[2] != "" && parts[3] != "") {
+                            rc[parts[2] "=" parts[3]] = "service (" f ")";
+                            if (!(parts[2] in rc_prop)) rc_prop[parts[2]] = "service (" f ")";
+                        }
                     }
                 }
             }
@@ -1417,12 +1453,15 @@ build_audit_comb() {
         }
         return 0;
     }
+    function is_system_indicator(p) {
+        return (p ~ /^(dev\.mnt\.|init\.svc_debug_pid\.|init\.svc\.|ro\.boottime\.|cache_key\.|ro\.boot\.|ro\.bootimage\.|partition\.)/);
+    }
     function is_junk_fast(p, cv, sr,    sc, mn, mx) {
         # Если сканер подтвердил флаг в бинарнике — флаг 100% живой на этом устройстве
-        if (sr ~ /^(DEFAULT_|HARDCODED_|DYNAMIC_|NO_DEFAULT|TABLE_)/) return 0;
+        if (sr ~ /^(DEFAULT_|HARDCODED_|DYNAMIC_|NO_DEFAULT|TABLE_|SYSTEM_INDICATOR)/) return 0;
         if (p in junk) return 1;
         if (junk_f != "") return 0;
-        if (cv == "" || p ~ /^(init\.svc|ro\.boottime)/ || is_rc_alive(p) || (p in fw_file)) return 0;
+        if (cv == "" || is_system_indicator(p) || is_rc_alive(p) || (p in fw_file)) return 0;
         sc = lc_scope[p]; mn = lc_min[p]; mx = lc_max[p];
         if (sc != "") {
             if (sc ~ /^(placebo|rudiment)/) return 1;
@@ -1487,22 +1526,35 @@ build_audit_comb() {
             if (p in over && over[p] == cv) src = "overridify";
             else if (key in mod) src = mod[key];
             else if (key in bp) src = bp[key];
+            else if (p in bp_prop) src = bp_prop[p];
             else if (p ~ /^persist\./ && (p in persist_p)) src = "persist (/data)";
             else if (key in rc) src = rc[key];
+            else if (p in rc_prop) src = rc_prop[p];
             else if (p ~ /^sys\.oplus\.audio\./) src = "audioserver (runtime)";
             else if (p ~ /^sys\.oplus\.boot_completed|^sys\.boot_completed/) src = "system_server (runtime)";
             else if (p ~ /^sys\.oplus\.display\./) src = "surfaceflinger (runtime)";
             else if (p ~ /^sys\./) src = "system_server (runtime)";
+            else if (p ~ /^cache_key\./) src = "framework (runtime)";
+            else if (p ~ /^(ro\.boot\.|ro\.bootimage\.|partition\.)/) src = "bootloader (kernel)";
+            else if (p ~ /^(dev\.mnt\.|init\.svc)/) src = "init (runtime)";
             else src = "runtime";
         }
         if (exp_seen_f != "" && (p in exp_seen)) next;
         if (exp_seen_f != "") print p >> exp_seen_f;
 
-        if (fl == "" && src != "" && src !~ /^runtime/ && src !~ /^unverified/ && src !~ / \(runtime\)/) {
-            if (src == "overridify") fl = "overridify (system.prop)";
-            else fl = src;
+        if (fl == "") {
+            if (src != "" && src !~ /^runtime/ && src !~ /^unverified/ && src !~ / \(runtime\)/) {
+                if (src == "overridify") fl = "overridify (system.prop)";
+                else fl = src;
+            } else if (is_system_indicator(p)) {
+                fl = (lbl_ind != "" ? lbl_ind : "Service Indicators");
+                sr = "SYSTEM_INDICATOR";
+            } else {
+                next;
+            }
         }
-        skey = (fl == "" ? "\xff_unknown" : fl);
+        ind_lbl = (lbl_ind != "" ? lbl_ind : "Service Indicators");
+        skey = (fl == "" ? "\xff_unknown" : (fl == ind_lbl ? "\xfe_indicators" : fl));
         print skey "\034" fl "\034" p "\034" cv "\034" sr "\034" src;
     }' "$smap" | LC_ALL=C sort -t"$(printf '\034')" -k1,1 -k3,3 > "$comb_out" 2>/dev/null
 
@@ -1510,8 +1562,88 @@ build_audit_comb() {
     [ -s "$comb_out" ]
 }
 
+resolve_subsystem_target() {
+    SUB_ID="$1"
+    case "$SUB_ID" in
+        hwui)
+            SUB_TITLE="$TXT_SUB_HWUI"
+            SUB_BINS="$(get_bins hwui)"
+            SUB_PAT="^(debug|ro|persist|persist\.sys)\.hwui\."
+            ;;
+        sf)
+            SUB_TITLE="$TXT_SUB_SF"
+            SUB_BINS="$(get_bins sf)"
+            SUB_PAT="^(debug|ro|persist|persist\.sys)\.(sf|surface_flinger|surfaceflinger|renderengine)\."
+            ;;
+        disp)
+            SUB_TITLE="$TXT_SUB_DISP"
+            SUB_BINS="$(get_bins disp)"
+            SUB_PAT="^((ro|persist|debug)?\.?vendor\.(display|gralloc)|vendor\.(display|gralloc))\."
+            ;;
+        audio)
+            SUB_TITLE="$TXT_SUB_AUDIO"
+            SUB_BINS="$(get_bins audio)"
+            SUB_PAT="^(aaudio|af|audio|ro\.audio|vendor\.audio|persist\.audio|persist\.vendor\.audio|ro\.vendor\.audio|vendor\.audio_hal|vendor\.qc2audio|vendor\.qti\.audio)\."
+            ;;
+        dolby)
+            SUB_TITLE="$TXT_SUB_DOLBY"
+            SUB_BINS="$(get_bins dolby)"
+            SUB_PAT="^(vendor\.audio\.dolby|ro\.vendor\.audio\.dolby|ro\.vendor\.dolby|persist\.vendor\.dolby|vendor\.dolby)\."
+            ;;
+        bt)
+            SUB_TITLE="$TXT_SUB_BT"
+            SUB_BINS="$(get_bins bt)"
+            SUB_PAT="^(bluetooth|ro\.bluetooth|persist\.bluetooth|persist\.vendor\.qcom\.bluetooth|persist\.vendor\.bt|vendor\.bluetooth|(persist\.sys|sys|ro)\.oplus\.bt)\."
+            ;;
+        input)
+            SUB_TITLE="$TXT_SUB_INPUT"
+            SUB_BINS="$(get_bins input)"
+            SUB_PAT="(resample\.latency|framepacing|scroll_opt)"
+            ;;
+        oem_audio)
+            SUB_TITLE="$TXT_OEM_AUDIO"
+            SUB_BINS="$(get_bins oem_audio)"
+            SUB_PAT="(oplus\.audio|vendor\.oplus\.hardware\.virtual_device\.audio|audio\.binaural|audio\.oplus|mss_effects)"
+            ;;
+        oem_disp)
+            SUB_TITLE="$TXT_OEM_DISP"
+            SUB_BINS="$(get_bins oem_disp)"
+            SUB_PAT="(oplus\.display|oplus\.touch|displaypanelfeature|mmdisplayfeature|fodcolor|panelchaplin|mixlut3d)"
+            ;;
+        oem_perf)
+            SUB_TITLE="$TXT_OEM_PERF"
+            SUB_BINS="$(get_bins oem_perf)"
+            SUB_PAT="(oplus\.(perf|osense|gameopt|game|urcc|orms|uah)|vendor\.oplus\.hardware\.(performance|gameopt|urcc|osense)|ro\.oplus\.boost|persist\.sys\.oiface|sys\.oplus\.oiface|debug\.oiface|persist\.sys\.horae|sys\.ipa_|vendor\.perf|ro\.vendor\.perf)"
+            ;;
+        oem_haptic)
+            SUB_TITLE="$TXT_OEM_HAPTIC"
+            SUB_BINS="$(get_bins oem_haptic)"
+            SUB_PAT="(oplus\.haptic|vendor\.oplus\.hardware\.(vibrator|oplusvibrator)|vendor\.haptic|vendor\.aac\.hardware\.richtap)"
+            ;;
+        oem_cam)
+            SUB_TITLE="$TXT_OEM_CAM"
+            SUB_BINS="$(get_bins oem_cam)"
+            SUB_PAT="(oplus\.camera|oplus\.video|cammidas|cameraextension|ro\.oplus\.image\.camera|vendor\.oplus\.hardware\.cammidas)"
+            ;;
+        oem_sys)
+            SUB_TITLE="$TXT_OEM_SYS"
+            SUB_BINS="$(get_bins oem_sys)"
+            SUB_PAT="(oplus\.(charger|power|rpmh|supervooc|battery)|vendor\.oplus\.hardware\.(charger|rpmh|power)|ro\.oplus\.(version|image)|persist\.sys\.oplus|sys\.oplus|vendor\.oplus\.hardware\.(stability|engineer|subsys)|persist\.oplus|persist\.sys\.(theia|ostatsd|hmbird)|sys\.theia|sys\.olc)"
+            ;;
+        full|all|*)
+            SUB_ID="full"
+            SUB_TITLE="$TXT_SUB_ALL"
+            local all_t=""
+            [ -f "$OVER_TMP_DIR/cache_all_bins.tmp" ] && all_t=$(cat "$OVER_TMP_DIR/cache_all_bins.tmp" 2>/dev/null)
+            [ -z "$all_t" ] && all_t="$(get_all_targets)"
+            SUB_BINS="$all_t"
+            SUB_PAT="."
+            ;;
+    esac
+}
+
 run_subsystem_audit() {
-    local title="$1" tb="$2" pat="$3" no_pause="${4:-0}"
+    local sid="$1" title="$2" tb="$3" pat="$4" no_pause="${5:-0}"
     [ "$no_pause" -eq 0 ] && clear
     echo -e "${C_CYAN}====================================================${C_RESET}"
     echo -e "  ${C_BOLD}$title${C_RESET}"
@@ -1523,42 +1655,44 @@ run_subsystem_audit() {
     local cat_id=$(echo "$title" | tr -cd 'a-zA-Z0-9')
     local comb="$OVER_TMP_DIR/sub_${cat_id}_comb.sorted"
 
+    local cnt=0
     if ! build_audit_comb "$cat_id" "$tb" "$pat" "$comb"; then
         echo -e "${C_RED}$TXT_AUDIT_NOT_FOUND${C_RESET}\n"
     else
         local cnt_file="$OVER_TMP_DIR/sub_cnt.tmp"
         render_audit_comb_to_terminal "$comb" "$cnt_file"
-        local cnt=$(cat "$cnt_file" 2>/dev/null || echo 0)
-        rm -f "$comb" "$cnt_file"
+        cnt=$(cat "$cnt_file" 2>/dev/null || echo 0)
+        rm -f "$cnt_file"
         echo -e "${C_CYAN}----------------------------------------------------${C_RESET}"
         echo -e "$TXT_AUDIT_TOTAL ${C_GREEN}$cnt${C_RESET}"
     fi
-    [ "$no_pause" -eq 0 ] && { echo -e "\n$TXT_PRESS_ENTER"; read -r _; }
+
+    if [ "$no_pause" -eq 0 ]; then
+        echo -e "\n ${C_BOLD}[E]${C_RESET} ${TXT_EXPORT_BTN:-Export report to file}   ${C_BOLD}[Enter]${C_RESET} $TXT_BACK"
+        printf " $TXT_CHOICE"
+        read -r act
+        case "$act" in
+            e|E)
+                local def_f="/sdcard/overridify_audit_${sid}.txt"
+                [ "$sid" = "full" ] && def_f="/sdcard/overridify_audit_report.txt"
+                echo ""
+                printf " ${TXT_EXPORT_PATH_PROMPT:-Output path} [${def_f}]: "
+                read -r user_f
+                [ -z "$user_f" ] && user_f="$def_f"
+                echo ""
+                generate_subsystem_audit_report "$sid" "$title" "$tb" "$pat" "$user_f"
+                echo -e "\n$TXT_PRESS_ENTER"; read -r _
+                ;;
+        esac
+    fi
+    rm -f "$comb"
     return 0
 }
 
 audit_subsystem() {
     local target="$1" no_pause="${2:-0}"
-    case "$target" in
-        hwui)       run_subsystem_audit "$TXT_SUB_HWUI" "$(get_bins hwui)" "^(debug|ro|persist|persist\.sys)\.hwui\." "$no_pause" ;;
-        sf)         run_subsystem_audit "$TXT_SUB_SF" "$(get_bins sf)" "^(debug|ro|persist|persist\.sys)\.(sf|surface_flinger|surfaceflinger|renderengine)\." "$no_pause" ;;
-        disp)       run_subsystem_audit "$TXT_SUB_DISP" "$(get_bins disp)" "^((ro|persist|debug)?\.?vendor\.(display|gralloc)|vendor\.(display|gralloc))\." "$no_pause" ;;
-        audio)      run_subsystem_audit "$TXT_SUB_AUDIO" "$(get_bins audio)" "^(aaudio|af|audio|ro\.audio|vendor\.audio|persist\.audio|persist\.vendor\.audio|ro\.vendor\.audio|vendor\.audio_hal|vendor\.qc2audio|vendor\.qti\.audio)\." "$no_pause" ;;
-        dolby)      run_subsystem_audit "$TXT_SUB_DOLBY" "$(get_bins dolby)" "^(vendor\.audio\.dolby|ro\.vendor\.audio\.dolby|ro\.vendor\.dolby|persist\.vendor\.dolby|vendor\.dolby)\." "$no_pause" ;;
-        bt)         run_subsystem_audit "$TXT_SUB_BT" "$(get_bins bt)" "^(bluetooth|ro\.bluetooth|persist\.bluetooth|persist\.vendor\.qcom\.bluetooth|persist\.vendor\.bt|vendor\.bluetooth|(persist\.sys|sys|ro)\.oplus\.bt)\." "$no_pause" ;;
-        input)      run_subsystem_audit "$TXT_SUB_INPUT" "$(get_bins input)" "(resample\.latency|framepacing|scroll_opt)" "$no_pause" ;;
-        oem_audio)  run_subsystem_audit "$TXT_OEM_AUDIO" "$(get_bins oem_audio)" "(oplus\.audio|vendor\.oplus\.hardware\.virtual_device\.audio|audio\.binaural|audio\.oplus|mss_effects)" "$no_pause" ;;
-        oem_disp)   run_subsystem_audit "$TXT_OEM_DISP" "$(get_bins oem_disp)" "(oplus\.display|oplus\.touch|displaypanelfeature|mmdisplayfeature|fodcolor|panelchaplin|mixlut3d)" "$no_pause" ;;
-        oem_perf)   run_subsystem_audit "$TXT_OEM_PERF" "$(get_bins oem_perf)" "(oplus\.(perf|osense|gameopt|game|urcc|orms|uah)|vendor\.oplus\.hardware\.(performance|gameopt|urcc|osense)|ro\.oplus\.boost|persist\.sys\.oiface|sys\.oplus\.oiface|debug\.oiface|persist\.sys\.horae|sys\.ipa_|vendor\.perf|ro\.vendor\.perf)" "$no_pause" ;;
-        oem_haptic) run_subsystem_audit "$TXT_OEM_HAPTIC" "$(get_bins oem_haptic)" "(oplus\.haptic|vendor\.oplus\.hardware\.(vibrator|oplusvibrator)|vendor\.haptic|vendor\.aac\.hardware\.richtap)" "$no_pause" ;;
-        oem_cam)    run_subsystem_audit "$TXT_OEM_CAM" "$(get_bins oem_cam)" "(oplus\.camera|oplus\.video|cammidas|cameraextension|ro\.oplus\.image\.camera|vendor\.oplus\.hardware\.cammidas)" "$no_pause" ;;
-        oem_sys)    run_subsystem_audit "$TXT_OEM_SYS" "$(get_bins oem_sys)" "(oplus\.(charger|power|rpmh|supervooc|battery)|vendor\.oplus\.hardware\.(charger|rpmh|power)|ro\.oplus\.(version|image)|persist\.sys\.oplus|sys\.oplus|vendor\.oplus\.hardware\.(stability|engineer|subsys)|persist\.oplus|persist\.sys\.(theia|ostatsd|hmbird)|sys\.theia|sys\.olc)" "$no_pause" ;;
-        full|all|*)
-            local all_t=""
-            [ -f "$OVER_TMP_DIR/cache_all_bins.tmp" ] && all_t=$(cat "$OVER_TMP_DIR/cache_all_bins.tmp" 2>/dev/null)
-            [ -z "$all_t" ] && all_t="$(get_all_targets)"
-            run_subsystem_audit "$TXT_SUB_ALL" "$all_t" "." "$no_pause" ;;
-    esac
+    resolve_subsystem_target "$target"
+    run_subsystem_audit "$SUB_ID" "$SUB_TITLE" "$SUB_BINS" "$SUB_PAT" "$no_pause"
 }
 
 scan_and_print_junk() {
@@ -1573,12 +1707,15 @@ scan_and_print_junk() {
 
     $AWK_BIN -v mod_f="$CACHE_MODS" -v scr_f="$CACHE_SCRIPTS" -v per_f="$CACHE_PERSIST" \
              -v bp_f="$CACHE_BUILDPROP" -v rc_f="$CACHE_INIT_RC" -v live_f="$CACHE_LIVE_PROPS" -v lc_f="$CACHE_LIFECYCLE" \
+             -v rc_alive_f="$OVER_TMP_DIR/cache_rc_alive.tmp" -v elf_f="$OVER_TMP_DIR/cache_elf_scan.tmp" \
+             -v dex_f="$CACHE_DEX_DEFAULTS" -v fw_f="$CACHE_FRAMEWORK" \
              -v prop_f="$PROP_FILE" \
              -v jtxt="$junk_txt" -v api="$API" -v soc_type="$SOC_TYPE" \
              -v is_xiaomi="$IS_XIAOMI" -v is_nubia="$IS_NUBIA" -v is_pal="$IS_PAL" -v has_rot="$HAS_ROT" \
              -v has_dirac="$HAS_DIRAC" -v has_waves="$HAS_WAVES" -v has_holo="$HAS_HOLO" \
              -v has_oreality="$HAS_OREALITY" -v has_ozo="$HAS_OZO" -v has_dts="$HAS_DTS" \
-             -v use_vk="$(getprop ro.hwui.use_vulkan)" '
+             -v use_vk="$(getprop ro.hwui.use_vulkan)" \
+             -v lbl_ind="${TXT_FILE_INDICATORS:-Service Indicators}" '
     function api_to_ver(a) {
         if (a == 14 || a == 15) return "4.0"; if (a >= 16 && a <= 18) return "4.x";
         if (a == 19 || a == 20) return "4.4"; if (a == 21 || a == 22) return "5.0";
@@ -1590,8 +1727,18 @@ scan_and_print_junk() {
         if (a == 35) return "15"; if (a == 36) return "16";
         return "";
     }
+    function is_system_indicator(p) {
+        return (p ~ /^(dev\.mnt\.|init\.svc_debug_pid\.|init\.svc\.|ro\.boottime\.|cache_key\.|ro\.boot\.|ro\.bootimage\.|partition\.)/);
+    }
+    function is_rc_alive_fast(p,    pref) {
+        if (p in rc_alive) return 1;
+        for (pref in rc_pref) {
+            if (index(p, pref) == 1) return 1;
+        }
+        return 0;
+    }
     function add_cand(p, v, rsn) {
-        if (p == "" || p ~ /^(init\.svc|ro\.boottime)/) return;
+        if (p == "" || is_system_indicator(p)) return;
         if (p in live) v = live[p];
         if (!(p in best_rsn) || (best_rsn[p] == jtxt && rsn ~ /^deprecated/)) {
             best_rsn[p] = rsn; best_val[p] = v;
@@ -1608,15 +1755,43 @@ scan_and_print_junk() {
             }
             close(lc_f);
         }
+        if (rc_alive_f != "") {
+            while ((getline l < rc_alive_f) > 0) {
+                if (l != "") {
+                    if (l ~ /[_.-]$/) rc_pref[l] = 1;
+                    else rc_alive[l] = 1;
+                }
+            }
+            close(rc_alive_f);
+        }
+        if (elf_f != "") {
+            while ((getline l < elf_f) > 0) {
+                split(l, a, "|");
+                if (a[2] != "NOT_A_PROPERTY" && a[2] != "NOT_FOUND_IN_BINARY") elf[a[1]] = 1;
+            }
+            close(elf_f);
+        }
+        if (dex_f != "") {
+            while ((getline l < dex_f) > 0) {
+                if (l !~ /^#/) { eq = index(l, "="); if (eq > 0) dex[substr(l, 1, eq - 1)] = 1; }
+            }
+            close(dex_f);
+        }
+        if (fw_f != "") {
+            while ((getline l < fw_f) > 0) {
+                split(l, a, "|"); if (a[1] != "") fw[a[1]] = 1;
+            }
+            close(fw_f);
+        }
         if (mod_f != "") {
-            while ((getline l < mod_f) > 0) { split(l, a, "|"); eq = index(a[1], "="); if (eq > 0) add_cand(substr(a[1], 1, eq - 1), substr(a[1], eq + 1), jtxt); }
+            while ((getline l < mod_f) > 0) { split(l, a, "|"); eq = index(a[1], "="); if (eq > 0) { mod[substr(a[1], 1, eq - 1)] = 1; add_cand(substr(a[1], 1, eq - 1), substr(a[1], eq + 1), jtxt); } }
             close(mod_f);
         }
         if (prop_f != "") {
             while ((getline l < prop_f) > 0) {
                 if (l !~ /^[[:space:]]*#/) {
                     sub(/^[[:space:]]+/, "", l); eq = index(l, "=");
-                    if (eq > 0) add_cand(substr(l, 1, eq - 1), substr(l, eq + 1), jtxt);
+                    if (eq > 0) { prop[substr(l, 1, eq - 1)] = 1; add_cand(substr(l, 1, eq - 1), substr(l, eq + 1), jtxt); }
                 }
             }
             close(prop_f);
@@ -1635,7 +1810,10 @@ scan_and_print_junk() {
         }
         if (per_f != "") {
             while ((getline p < per_f) > 0) {
-                if (p != "" && p !~ /^persist\.sys\.(timezone|locale|language|country|usb\.config|dalvik\.vm\.lib\.2)$/) add_cand(p, "", jtxt);
+                if (p != "") {
+                    per[p] = 1;
+                    if (p !~ /^persist\.sys\.(timezone|locale|language|country|usb\.config|dalvik\.vm\.lib\.2)$/) add_cand(p, "", jtxt);
+                }
             }
             close(per_f);
         }
@@ -1644,6 +1822,7 @@ scan_and_print_junk() {
                 split(l, a, "|"); eq = index(a[1], "=");
                 if (eq > 0) {
                     p = substr(a[1], 1, eq - 1);
+                    bp[p] = 1;
                     if (p ~ /^(debug\.|media\.stagefright\.|audio\.|vendor\.(audio|display|gralloc|camera|perf)\.|persist\.vendor\.|ro\.vendor\.audio\.|ro\.audio\.|ro\.config\.)/) add_cand(p, substr(a[1], eq + 1), jtxt);
                 }
             }
@@ -1657,8 +1836,11 @@ scan_and_print_junk() {
                     if (match(rest, /^setprop[[:space:]]+[^[:space:]]+/)) {
                         split(rest, parts, /[[:space:]]+/);
                         p = parts[2];
-                        if ((p in live) && p ~ /^(debug\.|vendor\.|audio\.|media\.|persist\.vendor\.)/) {
-                            add_cand(p, parts[3], jtxt);
+                        if (p != "") {
+                            rc[p] = 1;
+                            if ((p in live) && p ~ /^(debug\.|vendor\.|audio\.|media\.|persist\.vendor\.)/) {
+                                add_cand(p, parts[3], jtxt);
+                            }
                         }
                     }
                 }
@@ -1690,7 +1872,16 @@ scan_and_print_junk() {
                 else if (p ~ /ozo/ && has_ozo == 0) rsn = jtxt;
                 else if (p ~ /dts/ && has_dts == 0) rsn = jtxt;
             }
-            if (rsn != "") add_cand(p, live[p], rsn);
+            if (rsn != "") { add_cand(p, live[p], rsn); continue; }
+
+            # Неверифицированные runtime свойства (ghosts/placebo: not in ROM, no binary, no rc, no indicator)
+            if (is_system_indicator(p)) continue;
+            if (p !~ /^[a-zA-Z][a-zA-Z0-9_-]*(\.[a-zA-Z0-9_-]+)+$/) continue;
+            if (is_rc_alive_fast(p)) continue;
+            if ((p in elf) || (p in dex) || (p in fw)) continue;
+            if ((p in bp) || (p in rc) || (p in per) || (p in mod) || (p in prop)) continue;
+
+            add_cand(p, live[p], jtxt);
         }
         for (p in best_rsn) print p "=" best_val[p] "|" best_rsn[p];
     }' > "$cands_out" 2>/dev/null
@@ -1872,7 +2063,7 @@ scan_and_print_junk() {
             local persist_rbin="$OVER_CACHE_DIR/radar_bins.cache"
             [ ! -w "$OVER_CACHE_DIR" ] && persist_rbin=""
             local scan_sig=$(stat -c '%Y:%s' "$SCAN" 2>/dev/null)
-            local mod_ver="v1.7"
+            local mod_ver="v1.8"
             [ -f "$MODDIR/module.prop" ] && mod_ver=$(grep -m 1 '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2)
             local mods_hash=$(cat "$OVER_TMP_DIR/mods.sig" 2>/dev/null | md5sum 2>/dev/null | awk '{print $1}')
             [ -z "$mods_hash" ] && mods_hash=$(cat "$OVER_TMP_DIR/mods.sig" 2>/dev/null | tr '\n' '_')
@@ -2099,7 +2290,7 @@ run_junk_radar() {
 }
 
 cli_radar() {
-    load_language
+    init_default_en
     local do_clean=0
     case "$1" in --clean|-c) do_clean=1 ;; esac
 
@@ -2173,7 +2364,7 @@ run_search_audit() {
 }
 
 cli_search() {
-    load_language
+    init_default_en
     local q="$*"
     if [ -z "$q" ]; then
         echo -e "${C_RED}${TXT_ERR:-Error:}${C_RESET} ${TXT_SEARCH_ERR_EMPTY:-specify search query. Example: overridify search skia}"
@@ -2737,21 +2928,70 @@ menu_presets() {
 }
 
 menu_oem_extensions() {
+    local b_audio="$(get_bins oem_audio)"
+    local b_disp="$(get_bins oem_disp)"
+    local b_perf="$(get_bins oem_perf)"
+    local b_haptic="$(get_bins oem_haptic)"
+    local b_cam="$(get_bins oem_cam)"
+    local b_sys="$(get_bins oem_sys)"
+
     while true; do
         clear
         echo -e "${C_CYAN}====================================================${C_RESET}"
         echo -e "  ${C_BOLD}$TXT_OEM_TITLE${C_RESET}"
         echo -e "${C_CYAN}====================================================${C_RESET}\n"
-        echo -e " ${C_BOLD}[1]${C_RESET} $TXT_OEM_AUDIO\n ${C_BOLD}[2]${C_RESET} $TXT_OEM_DISP\n ${C_BOLD}[3]${C_RESET} $TXT_OEM_PERF\n ${C_BOLD}[4]${C_RESET} $TXT_OEM_HAPTIC\n ${C_BOLD}[5]${C_RESET} $TXT_OEM_CAM\n ${C_BOLD}[6]${C_RESET} $TXT_OEM_SYS\n ${C_BOLD}[0]${C_RESET} $TXT_BACK\n"
+
+        for _i in 1 2 3 4 5 6; do eval "opt_${_i}="; done
+        local count=0
+
+        if [ -n "${b_audio// /}" ]; then
+            count=$((count + 1))
+            echo -e " ${C_BOLD}[$count]${C_RESET} $TXT_OEM_AUDIO"
+            eval "opt_${count}=oem_audio"
+        fi
+        if [ -n "${b_disp// /}" ]; then
+            count=$((count + 1))
+            echo -e " ${C_BOLD}[$count]${C_RESET} $TXT_OEM_DISP"
+            eval "opt_${count}=oem_disp"
+        fi
+        if [ -n "${b_perf// /}" ]; then
+            count=$((count + 1))
+            echo -e " ${C_BOLD}[$count]${C_RESET} $TXT_OEM_PERF"
+            eval "opt_${count}=oem_perf"
+        fi
+        if [ -n "${b_haptic// /}" ]; then
+            count=$((count + 1))
+            echo -e " ${C_BOLD}[$count]${C_RESET} $TXT_OEM_HAPTIC"
+            eval "opt_${count}=oem_haptic"
+        fi
+        if [ -n "${b_cam// /}" ]; then
+            count=$((count + 1))
+            echo -e " ${C_BOLD}[$count]${C_RESET} $TXT_OEM_CAM"
+            eval "opt_${count}=oem_cam"
+        fi
+        if [ -n "${b_sys// /}" ]; then
+            count=$((count + 1))
+            echo -e " ${C_BOLD}[$count]${C_RESET} $TXT_OEM_SYS"
+            eval "opt_${count}=oem_sys"
+        fi
+
+        if [ "$count" -eq 0 ]; then
+            echo -e "  ${C_GRAY}${TXT_OEM_NONE:-No OEM extension files detected on this device.}${C_RESET}\n"
+        else
+            echo ""
+        fi
+        echo -e " ${C_BOLD}[0]${C_RESET} $TXT_BACK\n"
+
         printf " $TXT_CHOICE"; read -r och
         case "$och" in
-            1) audit_subsystem oem_audio ;;
-            2) audit_subsystem oem_disp ;;
-            3) audit_subsystem oem_perf ;;
-            4) audit_subsystem oem_haptic ;;
-            5) audit_subsystem oem_cam ;;
-            6) audit_subsystem oem_sys ;;
             0) return ;;
+            [1-9])
+                local target=""
+                eval "target=\$opt_${och}"
+                if [ -n "$target" ]; then
+                    audit_subsystem "$target"
+                fi
+                ;;
         esac
     done
 }
@@ -2779,35 +3019,88 @@ menu_audit_lab() {
     done
 }
 
-dump_cat_to_file() {
-    local cn="$1" bins="$2" pat="$3" out_f="$4"
+generate_subsystem_audit_report() {
+    local sid="$1" stitle="$2" sbins="$3" spat="$4" out_f="$5"
+    if [ "$sid" = "full" ] || [ "$sid" = "all" ]; then
+        generate_audit_report "$out_f"
+        return $?
+    fi
+
+    echo -e "${C_GRAY}$TXT_EXPORT_WRITING $out_f...${C_RESET}"
+    local t_start=$(date +%s.%N)
+    init_cache
+    wait_fw_cache
+
+    local cat_id=$(echo "$stitle" | tr -cd 'a-zA-Z0-9')
+    local comb="$OVER_TMP_DIR/sub_exp_${cat_id}_comb.sorted"
+    rm -f "$comb"
+
+    if ! build_audit_comb "$cat_id" "$sbins" "$spat" "$comb"; then
+        echo -e "${C_RED}$TXT_AUDIT_NOT_FOUND${C_RESET}"
+        return 1
+    fi
+
+    local unk_label="${TXT_FILE_UNKNOWN:-File unknown}"
+    local hdr_f="$OVER_TMP_DIR/sub_hdr.tmp"
     {
-        echo "----------------------------------------------------------"
-        echo "  CATEGORY: $cn"
-        echo "----------------------------------------------------------"
-        local cat_id=$(echo "$cn" | tr -cd 'a-zA-Z0-9')
-        local comb="$OVER_TMP_DIR/exp_${cat_id}_comb.sorted"
-        if build_audit_comb "$cat_id" "$bins" "$pat" "$comb"; then
-            local unk_label="${TXT_FILE_UNKNOWN:-File unknown}"
-            $AWK_BIN -F'\034' -v unk_label="$unk_label" '
-            BEGIN { prev_fl = "__INIT__"; }
-            {
-                fl = $2; p = $3; cv = $4; sr = $5; src = $6;
-                if (p == "") next;
-                if (fl != prev_fl) {
-                    prev_fl = fl;
-                    disp_fl = (fl != "" ? fl : unk_label);
-                    print "\n[ " disp_fl " ]\n";
-                }
-                d_cv = (cv != "" ? cv : "[unset]");
-                print "* " p;
-                print "    Value  : " d_cv;
-                print "    Source : " src;
-                print "    Scanner: " sr "\n";
-            }' "$comb"
-            rm -f "$comb"
-        fi
-    } > "$out_f"
+        echo "=========================================================="
+        echo "        OVERRIDIFY SUBSYSTEM AUDIT REPORT                 "
+        echo "=========================================================="
+        echo "Subsystem     : $stitle"
+        echo "Target ID     : $sid"
+        echo "Date / Time   : $(date)"
+        echo "Device Model  : $(getprop ro.product.model) ($(getprop ro.product.device))"
+        echo "SoC Hardware  : $SOC_TYPE ($(getprop ro.hardware) / $(getprop ro.board.platform))"
+        echo "Android SDK   : $API ($(getprop ro.build.version.release))"
+        [ -n "$OEM_INFO" ] && echo "OEM Framework : $OEM_INFO"
+        echo "ROM / Build   : $(getprop ro.build.display.id)"
+        echo "=========================================================="
+        echo ""
+    } > "$hdr_f"
+
+    local body_f="$OVER_TMP_DIR/sub_body.tmp"
+    local cnt_f="$OVER_TMP_DIR/sub_cnt.tmp"
+    $AWK_BIN -F'\034' -v unk_label="$unk_label" -v cnt_f="$cnt_f" '
+    BEGIN { prev_fl = "__INIT__"; cnt = 0; }
+    {
+        fl = $2; p = $3; cv = $4; sr = $5; src = $6;
+        if (p == "") next;
+        cnt++;
+        if (fl != prev_fl) {
+            prev_fl = fl;
+            disp_fl = (fl != "" ? fl : unk_label);
+            printf "\n[ %s ]\n\n", disp_fl;
+        }
+        d_cv = (cv != "" ? cv : "[unset]");
+        printf "* %s\n    Value  : %s\n    Source : %s\n    Scanner: %s\n\n", p, d_cv, src, sr;
+    }
+    END {
+        print cnt > cnt_f;
+    }' "$comb" > "$body_f" 2>/dev/null
+
+    local total_cnt=$(cat "$cnt_f" 2>/dev/null || echo 0)
+    rm -f "$cnt_f" "$comb"
+
+    local footer_f="$OVER_TMP_DIR/sub_footer.tmp"
+    {
+        echo "=========================================================="
+        echo "$TXT_AUDIT_TOTAL $total_cnt"
+        echo "=========================================================="
+    } > "$footer_f"
+
+    cat "$hdr_f" "$body_f" "$footer_f" > "$out_f" 2>/dev/null
+    rm -f "$hdr_f" "$body_f" "$footer_f"
+
+    local t_end=$(date +%s.%N)
+    local elapsed=$($AWK_BIN -v t0="$t_start" -v t1="$t_end" 'BEGIN { printf "%.1f", (t1-t0) }')
+
+    if [ -s "$out_f" ]; then
+        echo -e "\n${C_GREEN}$TXT_EXPORT_SUCCESS ${C_YELLOW}$out_f${C_RESET} ${C_GRAY}(${TXT_TIME:-time}: ${elapsed}${TXT_SEC:-s})${C_RESET}"
+        return 0
+    else
+        echo -e "\n${C_RED}$TXT_EXPORT_FAIL${C_RESET}"
+        return 1
+    fi
 }
 
 generate_audit_report() {
@@ -2965,16 +3258,38 @@ export_full_audit() {
 }
 
 cli_export() {
-    load_language
-    local of="${1:-/sdcard/overridify_audit_report.txt}"
-    echo -e "${C_CYAN}====================================================${C_RESET}"
-    echo -e "  ${C_BOLD}$TXT_EXPORT_TITLE (CLI)${C_RESET}"
-    echo -e "${C_CYAN}====================================================${C_RESET}\n"
-    generate_audit_report "$of"
+    init_default_en
+    local first="$1"
+    local second="$2"
+
+    case "$first" in
+        hwui|sf|disp|audio|dolby|bt|input|oem_audio|oem_disp|oem_perf|oem_haptic|oem_cam|oem_sys)
+            local of="${second:-/sdcard/overridify_audit_${first}.txt}"
+            echo -e "${C_CYAN}====================================================${C_RESET}"
+            echo -e "  ${C_BOLD}$TXT_EXPORT_SUBSYSTEM_TITLE (CLI)${C_RESET}"
+            echo -e "${C_CYAN}====================================================${C_RESET}\n"
+            resolve_subsystem_target "$first"
+            generate_subsystem_audit_report "$SUB_ID" "$SUB_TITLE" "$SUB_BINS" "$SUB_PAT" "$of"
+            ;;
+        all|full)
+            local of="${second:-/sdcard/overridify_audit_report.txt}"
+            echo -e "${C_CYAN}====================================================${C_RESET}"
+            echo -e "  ${C_BOLD}$TXT_EXPORT_TITLE (CLI)${C_RESET}"
+            echo -e "${C_CYAN}====================================================${C_RESET}\n"
+            generate_audit_report "$of"
+            ;;
+        *)
+            local of="${first:-/sdcard/overridify_audit_report.txt}"
+            echo -e "${C_CYAN}====================================================${C_RESET}"
+            echo -e "  ${C_BOLD}$TXT_EXPORT_TITLE (CLI)${C_RESET}"
+            echo -e "${C_CYAN}====================================================${C_RESET}\n"
+            generate_audit_report "$of"
+            ;;
+    esac
 }
 
 cli_preset() {
-    load_language
+    init_default_en
     init_cache
     wait_fw_cache
     local action="${1:-status}"
@@ -3116,16 +3431,64 @@ cli_preset() {
 }
 
 cli_audit() {
-    load_language
-    audit_subsystem "${1:-full}" 1
+    init_default_en
+    local target="${1:-full}"
+    local out_f=""
+    if [ "$2" = "-o" ] || [ "$2" = "--output" ]; then
+        if [ "$target" = "full" ] || [ "$target" = "all" ]; then
+            out_f="${3:-/sdcard/overridify_audit_report.txt}"
+        else
+            out_f="${3:-/sdcard/overridify_audit_${target}.txt}"
+        fi
+    elif [ -n "$2" ]; then
+        out_f="$2"
+    fi
+
+    resolve_subsystem_target "$target"
+
+    if [ -n "$out_f" ]; then
+        generate_subsystem_audit_report "$SUB_ID" "$SUB_TITLE" "$SUB_BINS" "$SUB_PAT" "$out_f"
+    else
+        run_subsystem_audit "$SUB_ID" "$SUB_TITLE" "$SUB_BINS" "$SUB_PAT" 1
+    fi
 }
 
 cli_help() {
-    load_language
+    init_default_en
     echo -e "${C_CYAN}====================================================${C_RESET}"
     echo -e "  ${C_BOLD}$TXT_TITLE — CLI${C_RESET}"
     echo -e "${C_CYAN}====================================================${C_RESET}\n"
     print_cli_help
+}
+
+menu_language() {
+    while true; do
+        clear
+        echo -e "${C_CYAN}====================================================${C_RESET}"
+        echo -e "  ${C_BOLD}LANGUAGE / ЯЗЫК / PILIH BAHASA / LINGUA${C_RESET}"
+        echo -e "${C_CYAN}====================================================${C_RESET}\n"
+        echo -e " ${C_BOLD}[1]${C_RESET} English"
+        echo -e " ${C_BOLD}[2]${C_RESET} Русский"
+        echo -e " ${C_BOLD}[3]${C_RESET} Bahasa Indonesia"
+        echo -e " ${C_BOLD}[4]${C_RESET} Italiano"
+        echo -e " ${C_BOLD}[5]${C_RESET} Español"
+        echo -e " ${C_BOLD}[6]${C_RESET} Português (Brasil)"
+        echo -e " ${C_BOLD}[7]${C_RESET} Türkçe"
+        echo -e " ${C_BOLD}[8]${C_RESET} हिन्दी (Hindi)"
+        echo -e " ${C_BOLD}[0]${C_RESET} $TXT_BACK\n"
+        printf " $TXT_CHOICE"; read -r lch
+        case "$lch" in
+            1) echo "en" > "$CFG_LANG"; load_language; return ;;
+            2) echo "ru" > "$CFG_LANG"; load_language; return ;;
+            3) echo "id" > "$CFG_LANG"; load_language; return ;;
+            4) echo "it" > "$CFG_LANG"; load_language; return ;;
+            5) echo "es" > "$CFG_LANG"; load_language; return ;;
+            6) echo "pt" > "$CFG_LANG"; load_language; return ;;
+            7) echo "tr" > "$CFG_LANG"; load_language; return ;;
+            8) echo "hi" > "$CFG_LANG"; load_language; return ;;
+            0) return ;;
+        esac
+    done
 }
 
 main_menu() {
@@ -3197,8 +3560,7 @@ main_menu() {
                 menu_presets; first_draw=1 ;;
             e|E) export_full_audit; first_draw=1 ;;
             l|L)
-                [ "$CUR_L" = "ru" ] && echo "en" > "$CFG_LANG" || echo "ru" > "$CFG_LANG"
-                load_language; first_draw=1 ;;
+                menu_language; first_draw=1 ;;
             r|R)
                 echo "# Overridify system.prop" > "$PROP_FILE"
                 echo -e "\n${C_GREEN}$TXT_RESET_DONE${C_RESET}"; sleep 2; first_draw=1 ;;
@@ -3238,7 +3600,7 @@ else
         export) cli_export "$@" ;;
         help|-h|--help) cli_help ;;
         *)
-            load_language
+            init_default_en
             echo -e "${C_RED}${TXT_UNKNOWN_CMD:-Unknown command:}${C_RESET} '$cmd'"
             echo -e "${TXT_USE_HELP:-Use: overridify help}"
             exit 1 ;;

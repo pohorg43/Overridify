@@ -6,7 +6,10 @@
 AUDIT_UNKNOWN_PROPS.md
 CHANGELOG.md
 DOLBY_AUDIT.md
+PROJECT_CONTEXT.md
 TODO.md
+language.cfg
+overridify.tar
 
 # Local development helper scripts and internal tools
 update.sh
